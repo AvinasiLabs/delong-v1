@@ -10,11 +10,12 @@ contract DAOGovernanceTest is DeLongTestBase {
         super.setUp();
 
         // Deploy governance token (simulating DLP token)
-        governanceToken = new DatasetToken(
+        governanceToken = new DatasetToken();
+        governanceToken.initialize(
             "DeLong Platform Token",
             "DLP",
             owner,
-            owner,
+            owner, // owner acts as IDO - tokens minted directly to owner
             1_000_000 * 10 ** 18
         );
         governanceToken.unfreeze();

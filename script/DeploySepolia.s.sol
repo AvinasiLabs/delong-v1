@@ -2,27 +2,21 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
-import "../src/mocks/MockUSDC.sol";
-import "../src/DatasetToken.sol";
-import "../src/DatasetManager.sol";
-import "../src/RentalPool.sol";
 import "../src/RentalManager.sol";
-import "../src/IDO.sol";
 import "../src/DAOTreasury.sol";
 import "../src/DAOGovernance.sol";
 import "../src/Factory.sol";
 
 /**
- * @title Deploy
- * @notice Deployment script for DeLong Protocol v1
- * @dev Usage:
- *      1. Start Anvil: anvil
- *      2. Deploy: forge script script/Deploy.s.sol:Deploy --rpc-url http://localhost:8545 --broadcast -vvvv
- *      3. Or use helper: ./script/deploy-local.sh
+ * @title DeploySepolia
+ * @notice Deployment script for DeLong Protocol v1 on Sepolia testnet
+ * @dev Usage: ./script/deploy-sepolia.sh
  */
-contract Deploy is Script {
+contract DeploySepolia is Script {
+    // MockUSDC deployed on Sepolia (10M initial supply to deployer for testing)
+    address public constant SEPOLIA_USDC = 0x854f718774e06879d085ef4f693bb0F2edEa0f24; // MockUSDC (6 decimals)
+    
     // Deployment addresses
-    MockUSDC public usdc;
     RentalManager public rentalManager;
     DAOTreasury public daoTreasury;
     DAOGovernance public daoGovernance;
@@ -32,60 +26,47 @@ contract Deploy is Script {
     uint256 public deployerPrivateKey;
     address public deployer;
     address public protocolTreasury;
-    address public projectAddress;
 
     function setUp() public {
         // Read private key from .env file
         deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         deployer = vm.addr(deployerPrivateKey);
 
-        // Get other addresses from environment or use defaults
-        protocolTreasury = vm.envOr(
-            "PROTOCOL_TREASURY",
-            address(0x7C04CeE8A78e736e1A4f2Bc43E7CCbCB8E3a9114)
-        ); // delong-admin
-        projectAddress = vm.envOr(
-            "PROJECT_ADDRESS",
-            address(0x555361045799feD9C50C669a6d7f41374c85c83C)
-        ); // original committee
+        // Protocol treasury defaults to deployer if not set
+        protocolTreasury = vm.envOr("PROTOCOL_TREASURY", deployer);
     }
 
     function run() external {
-        console.log("=== DeLong Protocol v1 Deployment ===");
+        console.log("=== DeLong Protocol v1 Sepolia Deployment ===");
+        console.log("Network: Sepolia Testnet");
         console.log("Deployer:", deployer);
         console.log("Protocol Treasury:", protocolTreasury);
-        console.log("Project Address:", projectAddress);
+        console.log("USDC Address:", SEPOLIA_USDC);
         console.log("");
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // Step 1: Deploy MockUSDC for local testing
-        console.log("Step 1: Deploying MockUSDC...");
-        usdc = new MockUSDC();
-        console.log("MockUSDC deployed at:", address(usdc));
-        console.log("");
+        // Step 1: Deploy shared infrastructure contracts
+        console.log("Step 1: Deploying shared infrastructure...");
 
-        // Step 2: Deploy shared infrastructure contracts
-        console.log("Step 2: Deploying shared infrastructure...");
-
-        rentalManager = new RentalManager(address(usdc), deployer);
+        rentalManager = new RentalManager(SEPOLIA_USDC, deployer);
         console.log("RentalManager deployed at:", address(rentalManager));
 
-        daoTreasury = new DAOTreasury(address(usdc), deployer);
+        daoTreasury = new DAOTreasury(SEPOLIA_USDC, deployer);
         console.log("DAOTreasury deployed at:", address(daoTreasury));
 
-        daoGovernance = new DAOGovernance(address(usdc), deployer);
+        daoGovernance = new DAOGovernance(SEPOLIA_USDC, deployer);
         console.log("DAOGovernance deployed at:", address(daoGovernance));
         console.log("");
 
-        // Step 3: Deploy Factory
-        console.log("Step 3: Deploying Factory...");
-        factory = new Factory(address(usdc), deployer);
+        // Step 2: Deploy Factory
+        console.log("Step 2: Deploying Factory...");
+        factory = new Factory(SEPOLIA_USDC, deployer);
         console.log("Factory deployed at:", address(factory));
         console.log("");
 
-        // Step 4: Configure contracts
-        console.log("Step 4: Configuring contracts...");
+        // Step 3: Configure contracts
+        console.log("Step 3: Configuring contracts...");
 
         // Configure Factory
         factory.configure(
@@ -111,25 +92,22 @@ contract Deploy is Script {
         console.log("DAOGovernance configured");
         console.log("");
 
-        // Step 5: Mint test USDC
-        console.log("Step 5: Minting test USDC...");
-        usdc.mint(deployer, 10_000_000 * 10 ** 6); // 10M USDC to deployer
-        usdc.mint(protocolTreasury, 1_000_000 * 10 ** 6); // 1M USDC to protocol treasury
-        console.log("Minted 10M USDC to deployer");
-        console.log("Minted 1M USDC to protocol treasury");
-        console.log("");
-
         vm.stopBroadcast();
 
-        // Step 6: Print deployment summary
+        // Step 4: Print deployment summary
         printDeploymentSummary();
+        
+        // Step 5: Save deployment addresses to file
+        saveDeploymentAddresses();
     }
 
     function printDeploymentSummary() internal view {
         console.log("=== Deployment Summary ===");
         console.log("");
+        console.log("Network: Sepolia Testnet");
+        console.log("");
         console.log("Core Contracts:");
-        console.log("  MockUSDC:        ", address(usdc));
+        console.log("  USDC:            ", SEPOLIA_USDC);
         console.log("  Factory:         ", address(factory));
         console.log("  RentalManager:   ", address(rentalManager));
         console.log("  DAOTreasury:     ", address(daoTreasury));
@@ -138,19 +116,34 @@ contract Deploy is Script {
         console.log("Configuration:");
         console.log("  Deployer:        ", deployer);
         console.log("  Protocol Treasury:", protocolTreasury);
-        console.log("  Project Address: ", projectAddress);
         console.log("");
         console.log("Next Steps:");
-        console.log("1. Deploy a dataset:");
-        console.log(
-            "   forge script script/DeployDataset.s.sol:DeployDataset --rpc-url http://localhost:8545 --broadcast"
-        );
+        console.log("1. Verify contracts on Etherscan:");
+        console.log("   forge verify-contract <address> <contract> --chain sepolia");
         console.log("");
-        console.log("2. Interact with contracts:");
-        console.log(
-            "   cast call <address> 'function(params)' --rpc-url http://localhost:8545"
-        );
+        console.log("2. Update frontend .env.local with these addresses");
+        console.log("");
+        console.log("3. Update subgraph config with these addresses");
         console.log("");
         console.log("=== Deployment Complete ===");
+    }
+    
+    function saveDeploymentAddresses() internal {
+        string memory deploymentInfo = string(abi.encodePacked(
+            "# DeLong Protocol v1 - Sepolia Deployment\n",
+            "# Deployed at: ", vm.toString(block.timestamp), "\n\n",
+            "NETWORK=sepolia\n",
+            "USDC_ADDRESS=", vm.toString(SEPOLIA_USDC), "\n",
+            "FACTORY_ADDRESS=", vm.toString(address(factory)), "\n",
+            "RENTAL_MANAGER_ADDRESS=", vm.toString(address(rentalManager)), "\n",
+            "DAO_TREASURY_ADDRESS=", vm.toString(address(daoTreasury)), "\n",
+            "DAO_GOVERNANCE_ADDRESS=", vm.toString(address(daoGovernance)), "\n",
+            "DEPLOYER_ADDRESS=", vm.toString(deployer), "\n",
+            "PROTOCOL_TREASURY_ADDRESS=", vm.toString(protocolTreasury), "\n"
+        ));
+        
+        vm.writeFile("./deployments/sepolia.env", deploymentInfo);
+        console.log("");
+        console.log("Deployment addresses saved to: ./deployments/sepolia.env");
     }
 }

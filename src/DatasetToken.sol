@@ -24,6 +24,16 @@ interface IRentalPool {
  *      - Links to RentalPool for dividend distribution
  */
 contract DatasetToken is ERC20, Ownable {
+    // ========== Initialization Guard ==========
+
+    /// @notice Prevents reinitialization
+    bool private _initialized;
+
+    // ========== Token Metadata (for proxy pattern) ==========
+
+    string private _tokenName;
+    string private _tokenSymbol;
+
     // ========== Associated Contracts ==========
 
     /// @notice Address of the RentalPool contract for dividend distribution
@@ -70,45 +80,76 @@ contract DatasetToken is ERC20, Ownable {
     error AlreadyUnfrozen();
     error AlreadySet();
     error ZeroAddress();
+    error AlreadyInitialized();
 
-    // ========== Constructor ==========
+    // ========== Constructor (for implementation contract) ==========
 
     /**
-     * @notice Initializes the dataset token
+     * @notice Constructor sets dummy values for implementation contract
+     * @dev The implementation contract is never used directly, only cloned
+     */
+    constructor() ERC20("DatasetToken Implementation", "DT-IMPL") Ownable(msg.sender) {}
+
+    // ========== Initializer (called after cloning) ==========
+
+    /**
+     * @notice Initializes the cloned dataset token
      * @param name_ Token name (e.g., "DeLong Dataset AI Training")
      * @param symbol_ Token symbol (e.g., "DLAI")
-     * @param initialOwner_ Initial owner address (usually IDO contract)
-     * @param dleContract_ IDO contract address (can be zero, set later via setDLEContract)
-     * @param initialSupply_ Initial token supply (usually minted to IDO contract)
+     * @param initialOwner_ Initial owner address (usually Factory)
+     * @param dleContract_ IDO contract address
+     * @param initialSupply_ Initial token supply (minted to this contract, then transferred to IDO)
      */
-    constructor(
+    function initialize(
         string memory name_,
         string memory symbol_,
         address initialOwner_,
         address dleContract_,
         uint256 initialSupply_
-    ) ERC20(name_, symbol_) Ownable(initialOwner_) {
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
+
+        // Set token metadata
+        _tokenName = name_;
+        _tokenSymbol = symbol_;
+
+        // Transfer ownership
+        _transferOwnership(initialOwner_);
+
         // Mark initial owner (usually Factory) as exempt from freezing
         frozenExempt[initialOwner_] = true;
 
-        // Allow zero address, can be set later via setDLEContract
-        if (dleContract_ != address(0)) {
-            dleContract = dleContract_;
-            // Mark IDO contract as exempt from freezing
-            frozenExempt[dleContract_] = true;
+        // Set IDO contract
+        if (dleContract_ == address(0)) revert ZeroAddress();
+        dleContract = dleContract_;
+        frozenExempt[dleContract_] = true;
 
-            // Mint initial supply to IDO contract
-            if (initialSupply_ > 0) {
-                _mint(dleContract_, initialSupply_);
-            }
-        } else {
-            // If IDO not set yet, mint to owner (usually Factory)
-            if (initialSupply_ > 0) {
-                _mint(initialOwner_, initialSupply_);
-            }
+        // Mint initial supply directly to IDO contract
+        if (initialSupply_ > 0) {
+            _mint(dleContract_, initialSupply_);
         }
 
-        isFrozen = true; // Start in frozen state
+        // Start in frozen state
+        isFrozen = true;
+    }
+
+    // ========== Overrides for proxy pattern ==========
+
+    /**
+     * @notice Returns the name of the token
+     * @dev Overrides ERC20.name() to return custom name set in initialize()
+     */
+    function name() public view override returns (string memory) {
+        return bytes(_tokenName).length > 0 ? _tokenName : super.name();
+    }
+
+    /**
+     * @notice Returns the symbol of the token
+     * @dev Overrides ERC20.symbol() to return custom symbol set in initialize()
+     */
+    function symbol() public view override returns (string memory) {
+        return bytes(_tokenSymbol).length > 0 ? _tokenSymbol : super.symbol();
     }
 
     // ========== External Functions ==========

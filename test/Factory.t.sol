@@ -15,9 +15,11 @@ contract FactoryTest is DeLongTestBase {
         factory = new Factory(address(usdc), owner);
 
         // Configure Factory
-        factory.setRentalManager(address(rentalManager));
-        factory.setDAOTreasury(address(daoTreasury));
-        factory.setProtocolTreasury(protocolTreasury);
+        factory.configure(
+            address(rentalManager),
+            address(daoTreasury),
+            protocolTreasury
+        );
 
         // Configure shared contracts
         rentalManager.setFactory(address(factory)); // Allow Factory to set prices
@@ -49,11 +51,6 @@ contract FactoryTest is DeLongTestBase {
             0,
             "Initial dataset count should be 0"
         );
-        assertEq(
-            factory.deploymentFee(),
-            100 * 10 ** 6,
-            "Default deployment fee should be 100 USDC"
-        );
     }
 
     function test_DeployDataset() public {
@@ -65,11 +62,6 @@ contract FactoryTest is DeLongTestBase {
             minRaiseRatio: 7500, // 75%
             initialPrice: 1 * 10 ** 6 // 1 USDC
         });
-
-        // Pay deployment fee
-        usdc.mint(user1, 100 * 10 ** 6);
-        vm.prank(user1);
-        usdc.approve(address(factory), 100 * 10 ** 6);
 
         // Deploy dataset
         vm.prank(user1);
@@ -95,11 +87,8 @@ contract FactoryTest is DeLongTestBase {
             initialPrice: 1 * 10 ** 6
         });
 
-        usdc.mint(user1, 100 * 10 ** 6);
         vm.prank(user1);
-        usdc.approve(address(factory), 100 * 10 ** 6);
-
-        vm.prank(user1);
+        vm.recordLogs();
         uint256 datasetId = factory.deployDataset(
             projectAddress,
             "Test Dataset",
@@ -109,34 +98,28 @@ contract FactoryTest is DeLongTestBase {
             config
         );
 
-        // Get dataset suite
-        (
-            address ido,
-            address datasetToken,
-            address datasetManagerAddr,
-            address rentalPoolAddr,
-            address project,
-            uint256 createdAt,
-            bool exists
-        ) = factory.datasets(datasetId);
+        // Get deployed addresses from event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("DatasetDeployed(uint256,address,address,address,address,address)");
+
+        address ido;
+        address datasetToken;
+        address datasetManagerAddr;
+        address rentalPoolAddr;
+
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                (ido, datasetToken, datasetManagerAddr, rentalPoolAddr) =
+                    abi.decode(entries[i].data, (address, address, address, address));
+                break;
+            }
+        }
 
         // Verify all contracts created
         assertTrue(ido != address(0), "IDO should be created");
-        assertTrue(
-            datasetToken != address(0),
-            "DatasetToken should be created"
-        );
-        assertTrue(
-            datasetManagerAddr != address(0),
-            "DatasetManager should be created"
-        );
-        assertTrue(
-            rentalPoolAddr != address(0),
-            "RentalPool should be created"
-        );
-        assertEq(project, projectAddress, "Project address should match");
-        assertGt(createdAt, 0, "Created timestamp should be set");
-        assertTrue(exists, "Dataset should exist");
+        assertTrue(datasetToken != address(0), "DatasetToken should be created");
+        assertTrue(datasetManagerAddr != address(0), "DatasetManager should be created");
+        assertTrue(rentalPoolAddr != address(0), "RentalPool should be created");
     }
 
     function test_GetDatasetById() public {
@@ -148,11 +131,8 @@ contract FactoryTest is DeLongTestBase {
             initialPrice: 1 * 10 ** 6
         });
 
-        usdc.mint(user1, 100 * 10 ** 6);
         vm.prank(user1);
-        usdc.approve(address(factory), 100 * 10 ** 6);
-
-        vm.prank(user1);
+        vm.recordLogs();
         uint256 datasetId = factory.deployDataset(
             projectAddress,
             "Test",
@@ -162,14 +142,13 @@ contract FactoryTest is DeLongTestBase {
             config
         );
 
-        Factory.DatasetSuite memory suite = factory.getDataset(datasetId);
-
-        assertTrue(suite.ido != address(0), "IDO should exist");
-        assertTrue(suite.datasetToken != address(0), "Token should exist");
-        assertTrue(suite.exists, "Suite should exist");
+        // Verify via event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        assertEq(datasetId, 1, "Dataset ID should be 1");
+        assertTrue(entries.length > 0, "Should emit event");
     }
 
-    function test_GetAllDatasetIds() public {
+    function test_MultipleDatasetDeployment() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
             k: 1000,
@@ -180,12 +159,8 @@ contract FactoryTest is DeLongTestBase {
 
         // Deploy 3 datasets
         for (uint256 i = 0; i < 3; i++) {
-            usdc.mint(user1, 100 * 10 ** 6);
             vm.prank(user1);
-            usdc.approve(address(factory), 100 * 10 ** 6);
-
-            vm.prank(user1);
-            factory.deployDataset(
+            uint256 id = factory.deployDataset(
                 projectAddress,
                 "Test",
                 "TST",
@@ -193,71 +168,33 @@ contract FactoryTest is DeLongTestBase {
                 10 * 10 ** 6,
                 config
             );
+            assertEq(id, i + 1, "Dataset ID should increment");
         }
 
-        uint256[] memory ids = factory.getAllDatasetIds();
-        assertEq(ids.length, 3, "Should have 3 dataset IDs");
-        assertEq(ids[0], 0, "First ID should be 0");
-        assertEq(ids[1], 1, "Second ID should be 1");
-        assertEq(ids[2], 2, "Third ID should be 2");
+        assertEq(factory.datasetCount(), 3, "Should have 3 datasets");
     }
 
-    function test_SetDeploymentFee() public {
-        uint256 newFee = 200 * 10 ** 6; // 200 USDC
-
-        factory.setDeploymentFee(newFee);
-
-        assertEq(
-            factory.deploymentFee(),
-            newFee,
-            "Deployment fee should be updated"
-        );
-    }
-
-    function test_DeploymentFeeCollection() public {
-        Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000,
-            k: 1000,
-            betaLP: 7000,
-            minRaiseRatio: 7500,
-            initialPrice: 1 * 10 ** 6
-        });
-
-        uint256 fee = 100 * 10 ** 6;
-        usdc.mint(user1, fee);
-        vm.prank(user1);
-        usdc.approve(address(factory), fee);
-
-        uint256 treasuryBefore = usdc.balanceOf(protocolTreasury);
-
-        vm.prank(user1);
-        factory.deployDataset(
-            projectAddress,
-            "Test",
-            "TST",
-            "ipfs://test",
-            10 * 10 ** 6,
-            config
-        );
-
-        uint256 treasuryAfter = usdc.balanceOf(protocolTreasury);
-
-        assertEq(
-            treasuryAfter - treasuryBefore,
-            fee,
-            "Protocol treasury should receive deployment fee"
-        );
-    }
-
-    function test_RevertSetRentalManager_AlreadySet() public {
+    function test_Configure() public {
         address newManager = makeAddr("newManager");
 
-        vm.expectRevert(Factory.AlreadySet.selector);
-        factory.setRentalManager(newManager);
+        factory.configure(newManager, address(0), address(0));
+
+        assertEq(factory.rentalManager(), newManager, "Manager should be updated");
     }
 
-    function test_GetTotalDatasets() public {
-        assertEq(factory.getTotalDatasets(), 0, "Initial count should be 0");
+    // Deployment fee feature has been removed
+    // Test removed: test_DeploymentFeeCollection
+
+    function test_ConfigureOnlyOwner() public {
+        address newManager = makeAddr("newManager");
+
+        vm.prank(user1);
+        vm.expectRevert();
+        factory.configure(newManager, address(0), address(0));
+    }
+
+    function test_DatasetCounter() public {
+        assertEq(factory.datasetCount(), 0, "Initial count should be 0");
 
         // Deploy one dataset
         Factory.IDOConfig memory config = Factory.IDOConfig({
@@ -268,10 +205,6 @@ contract FactoryTest is DeLongTestBase {
             initialPrice: 1 * 10 ** 6
         });
 
-        usdc.mint(user1, 100 * 10 ** 6);
-        vm.prank(user1);
-        usdc.approve(address(factory), 100 * 10 ** 6);
-
         vm.prank(user1);
         factory.deployDataset(
             projectAddress,
@@ -283,7 +216,7 @@ contract FactoryTest is DeLongTestBase {
         );
 
         assertEq(
-            factory.getTotalDatasets(),
+            factory.datasetCount(),
             1,
             "Count should be 1 after deployment"
         );

@@ -11,20 +11,24 @@ contract RentalManagerTest is DeLongTestBase {
         super.setUp();
 
         // Deploy core contracts
-        datasetToken = new DatasetToken(
+        datasetToken = new DatasetToken();
+        datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
-            owner,
+            owner, // owner acts as IDO - tokens minted directly to owner
             10_000_000 * 10 ** 18
         );
-        datasetManager = new DatasetManager(
+
+        datasetManager = new DatasetManager();
+        datasetManager.initialize(
             address(datasetToken),
             projectAddress,
             owner,
             "ipfs://test"
         );
-        rentalPool = new RentalPool(
+        rentalPool = new RentalPool();
+        rentalPool.initialize(
             address(usdc),
             address(datasetToken),
             owner

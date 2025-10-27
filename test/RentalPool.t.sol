@@ -10,16 +10,18 @@ contract RentalPoolTest is DeLongTestBase {
         super.setUp();
 
         // Deploy DatasetToken
-        datasetToken = new DatasetToken(
+        datasetToken = new DatasetToken();
+        datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
-            owner,
+            owner, // owner acts as IDO - tokens minted directly to owner
             10_000_000 * 10 ** 18
         );
 
         // Deploy RentalPool
-        rentalPool = new RentalPool(
+        rentalPool = new RentalPool();
+        rentalPool.initialize(
             address(usdc),
             address(datasetToken),
             owner

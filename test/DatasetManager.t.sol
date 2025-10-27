@@ -11,16 +11,18 @@ contract DatasetManagerTest is DeLongTestBase {
         super.setUp();
 
         // Deploy DatasetToken
-        datasetToken = new DatasetToken(
+        datasetToken = new DatasetToken();
+        datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
-            owner,
+            owner, // owner acts as IDO in this test - tokens minted directly to owner
             1_000_000 * 10 ** 18
         );
 
         // Deploy DatasetManager
-        datasetManager = new DatasetManager(
+        datasetManager = new DatasetManager();
+        datasetManager.initialize(
             address(datasetToken),
             projectAddress,
             owner,

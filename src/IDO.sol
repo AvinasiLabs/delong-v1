@@ -36,57 +36,62 @@ contract IDO is ReentrancyGuard {
     /// @notice Fee denominator (100% = 10000)
     uint256 public constant FEE_DENOMINATOR = 10000;
 
-    // ========== Immutable Parameters ==========
+    // ========== Initialization Guard ==========
+
+    /// @notice Prevents reinitialization
+    bool private _initialized;
+
+    // ========== Configuration Parameters ==========
 
     /// @notice Project reserved token ratio (e.g., 2000 = 20%)
-    uint256 public immutable alphaProject;
+    uint256 public alphaProject;
 
     /// @notice Price growth coefficient (controls curve steepness)
-    uint256 public immutable k;
+    uint256 public k;
 
     /// @notice LP lock ratio (e.g., 7000 = 70% of raised funds for LP)
-    uint256 public immutable betaLP;
+    uint256 public betaLP;
 
     /// @notice Minimum raise ratio (e.g., 7500 = 75%, must sell at least 75% to succeed)
-    uint256 public immutable minRaiseRatio;
+    uint256 public minRaiseRatio;
 
     /// @notice Initial price in USDC (6 decimals)
-    uint256 public immutable initialPrice;
+    uint256 public initialPrice;
 
     /// @notice Project owner address (multisig wallet)
-    address public immutable projectAddress;
+    address public projectAddress;
 
     /// @notice Dataset token contract
-    address public immutable tokenAddress;
+    address public tokenAddress;
 
     /// @notice Protocol treasury address (receives fees)
-    address public immutable protocolTreasury;
+    address public protocolTreasury;
 
     /// @notice USDC token contract
-    address public immutable usdcToken;
+    address public usdcToken;
 
     /// @notice DAO Treasury address (receives project funding)
-    address public immutable daoTreasury;
+    address public daoTreasury;
 
     /// @notice Rental Manager address (receives LP tokens)
-    address public immutable rentalManager;
+    address public rentalManager;
 
-    // ========== Derived Immutable Values ==========
+    // ========== Derived Values ==========
 
     /// @notice Salable tokens (1 - alpha) * TOTAL_SUPPLY
-    uint256 public immutable salableTokens;
+    uint256 public salableTokens;
 
     /// @notice Project reserved tokens (alpha * TOTAL_SUPPLY)
-    uint256 public immutable projectTokens;
+    uint256 public projectTokens;
 
     /// @notice Target tokens to sell (100% of salable tokens)
-    uint256 public immutable targetTokens;
+    uint256 public targetTokens;
 
     /// @notice IDO start timestamp
-    uint256 public immutable startTime;
+    uint256 public startTime;
 
     /// @notice IDO end timestamp (startTime + 14 days)
-    uint256 public immutable endTime;
+    uint256 public endTime;
 
     // ========== Dynamic State ==========
 
@@ -185,11 +190,16 @@ contract IDO is ReentrancyGuard {
     error NotFailed();
     error AlreadyClaimed();
     error CannotReachTarget();
+    error AlreadyInitialized();
 
-    // ========== Constructor ==========
+    // ========== Constructor (for implementation contract) ==========
+
+    constructor() {}
+
+    // ========== Initializer ==========
 
     /**
-     * @notice Initializes the IDO contract
+     * @notice Initializes the cloned IDO contract
      * @param alphaProject_ Project reserved ratio (basis points, e.g., 2000 = 20%)
      * @param k_ Price growth coefficient
      * @param betaLP_ LP lock ratio (basis points, e.g., 7000 = 70%)
@@ -202,7 +212,7 @@ contract IDO is ReentrancyGuard {
      * @param daoTreasury_ DAO treasury address
      * @param rentalManager_ Rental manager address
      */
-    constructor(
+    function initialize(
         uint256 alphaProject_,
         uint256 k_,
         uint256 betaLP_,
@@ -214,7 +224,10 @@ contract IDO is ReentrancyGuard {
         address protocolTreasury_,
         address daoTreasury_,
         address rentalManager_
-    ) {
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
+
         // Validate addresses
         if (
             projectAddress_ == address(0) ||
@@ -238,7 +251,7 @@ contract IDO is ReentrancyGuard {
             revert InvalidParameters();
         }
 
-        // Set immutable parameters
+        // Set parameters
         alphaProject = alphaProject_;
         k = k_;
         betaLP = betaLP_;

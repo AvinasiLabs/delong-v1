@@ -237,19 +237,20 @@ contract RentalManager is Ownable, ReentrancyGuard {
      * @param datasetToken Dataset token address
      * @param rentalIndex Rental record index
      * @param additionalMinutes Additional minutes used
-     * @param signature Backend signature for verification
+     * @param signature Backend signature for verification (currently unused in MVP, reserved for production)
      */
     function recordUsage(
         address user,
         address datasetToken,
         uint256 rentalIndex,
         uint256 additionalMinutes,
-        bytes memory signature
+        bytes memory signature // solhint-disable-line no-unused-vars
     ) external {
         if (!authorizedBackends[msg.sender]) revert Unauthorized();
 
-        // Verify signature (simplified for MVP)
-        // In production, implement proper signature verification
+        // TODO: Implement signature verification for production
+        // Currently relying on authorizedBackends whitelist for MVP
+        // In production, implement proper signature verification:
         // bytes32 messageHash = keccak256(abi.encodePacked(user, datasetToken, rentalIndex, additionalMinutes));
         // address signer = messageHash.toEthSignedMessageHash().recover(signature);
         // if (!authorizedBackends[signer]) revert InvalidSignature();

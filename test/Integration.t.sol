@@ -34,9 +34,11 @@ contract IntegrationTest is DeLongTestBase {
         factory = new Factory(address(usdc), owner);
 
         // Configure Factory
-        factory.setRentalManager(address(rentalManager));
-        factory.setDAOTreasury(address(daoTreasury));
-        factory.setProtocolTreasury(protocolTreasury);
+        factory.configure(
+            address(rentalManager),
+            address(daoTreasury),
+            protocolTreasury
+        );
 
         // Configure shared contracts
         rentalManager.setFactory(address(factory));
@@ -75,6 +77,7 @@ contract IntegrationTest is DeLongTestBase {
         usdc.approve(address(factory), 100 * 10 ** 6);
 
         vm.prank(user1);
+        vm.recordLogs();
         uint256 datasetId = factory.deployDataset(
             projectAddress,
             "AI Training Dataset",
@@ -84,12 +87,17 @@ contract IntegrationTest is DeLongTestBase {
             config
         );
 
-        // Get deployed contracts
-        Factory.DatasetSuite memory suite = factory.getDataset(datasetId);
-        datasetTokenAddr = suite.datasetToken;
-        idoAddr = suite.ido;
-        datasetManagerAddr = suite.datasetManager;
-        rentalPoolAddr = suite.rentalPool;
+        // Get deployed contracts from event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        // DatasetDeployed event signature
+        bytes32 eventSig = keccak256("DatasetDeployed(uint256,address,address,address,address,address)");
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                (idoAddr, datasetTokenAddr, datasetManagerAddr, rentalPoolAddr) =
+                    abi.decode(entries[i].data, (address, address, address, address));
+                break;
+            }
+        }
 
         assertTrue(idoAddr != address(0), "IDO should be deployed");
 
@@ -238,6 +246,7 @@ contract IntegrationTest is DeLongTestBase {
         vm.prank(user1);
         usdc.approve(address(factory), 100 * 10 ** 6);
         vm.prank(user1);
+        vm.recordLogs();
         uint256 datasetId = factory.deployDataset(
             projectAddress,
             "Test Dataset",
@@ -247,8 +256,16 @@ contract IntegrationTest is DeLongTestBase {
             config
         );
 
-        Factory.DatasetSuite memory suite = factory.getDataset(datasetId);
-        address datasetTokenAddr_ = suite.datasetToken;
+        // Get token address from event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("DatasetDeployed(uint256,address,address,address,address,address)");
+        address datasetTokenAddr_;
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                (,datasetTokenAddr_,,) = abi.decode(entries[i].data, (address, address, address, address));
+                break;
+            }
+        }
 
         // Note: TEE backend already configured by Factory
 
@@ -296,6 +313,7 @@ contract IntegrationTest is DeLongTestBase {
         // Deploy dataset 1
         vm.startPrank(user1);
         usdc.approve(address(factory), 200 * 10 ** 6);
+        vm.recordLogs();
         uint256 id1 = factory.deployDataset(
             projectAddress,
             "Dataset 1",
@@ -304,11 +322,13 @@ contract IntegrationTest is DeLongTestBase {
             10 * 10 ** 6,
             config
         );
+        Vm.Log[] memory entries1 = vm.getRecordedLogs();
         vm.stopPrank();
 
         // Deploy dataset 2
         vm.startPrank(user2);
         usdc.approve(address(factory), 200 * 10 ** 6);
+        vm.recordLogs();
         uint256 id2 = factory.deployDataset(
             projectAddress,
             "Dataset 2",
@@ -317,33 +337,43 @@ contract IntegrationTest is DeLongTestBase {
             20 * 10 ** 6,
             config
         );
+        Vm.Log[] memory entries2 = vm.getRecordedLogs();
         vm.stopPrank();
+
+        // Get token addresses from events
+        bytes32 eventSig = keccak256("DatasetDeployed(uint256,address,address,address,address,address)");
+        address token1;
+        address token2;
+
+        for (uint i = 0; i < entries1.length; i++) {
+            if (entries1[i].topics[0] == eventSig) {
+                (, token1,,) = abi.decode(entries1[i].data, (address, address, address, address));
+                break;
+            }
+        }
+
+        for (uint i = 0; i < entries2.length; i++) {
+            if (entries2[i].topics[0] == eventSig) {
+                (, token2,,) = abi.decode(entries2[i].data, (address, address, address, address));
+                break;
+            }
+        }
 
         // Verify both datasets deployed
         assertEq(factory.datasetCount(), 2, "Should have 2 datasets");
 
-        Factory.DatasetSuite memory suite1 = factory.getDataset(id1);
-        Factory.DatasetSuite memory suite2 = factory.getDataset(id2);
-
-        // Verify datasets are different
-        assertTrue(suite1.ido != suite2.ido, "IDOs should be different");
-        assertTrue(
-            suite1.datasetToken != suite2.datasetToken,
-            "Tokens should be different"
-        );
-        assertTrue(
-            suite1.rentalPool != suite2.rentalPool,
-            "Pools should be different"
-        );
+        // Verify IDs are sequential
+        assertEq(id1, 1, "First ID should be 1");
+        assertEq(id2, 2, "Second ID should be 2");
 
         // Verify pricing is set correctly for each dataset
         assertEq(
-            rentalManager.hourlyRate(suite1.datasetToken),
+            rentalManager.hourlyRate(token1),
             10 * 10 ** 6,
             "Dataset 1 rate should be 10 USDC"
         );
         assertEq(
-            rentalManager.hourlyRate(suite2.datasetToken),
+            rentalManager.hourlyRate(token2),
             20 * 10 ** 6,
             "Dataset 2 rate should be 20 USDC"
         );

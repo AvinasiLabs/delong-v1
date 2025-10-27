@@ -10,8 +10,16 @@ out/
 # Docs
 docs/
 
-# Dotenv file
-.env
+# Dotenv file (root level only, deployment addresses are OK)
+/.env
+*.private.env
+
+# Deployment artifacts (keep addresses, ignore private keys)
+deployments/*.key
+deployments/*.private
+
+# Node modules (for subgraph)
+node_modules/
 
 # Pair Programming
 prompt/

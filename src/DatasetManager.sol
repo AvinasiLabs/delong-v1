@@ -11,10 +11,15 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *      Works with TEE Backend for trial access control and usage tracking
  */
 contract DatasetManager is Ownable {
+    // ========== Initialization Guard ==========
+
+    /// @notice Prevents reinitialization
+    bool private _initialized;
+
     // ========== Associated Contracts ==========
 
-    /// @notice Address of the associated DatasetToken contract (immutable)
-    address public immutable datasetToken;
+    /// @notice Address of the associated DatasetToken contract
+    address public datasetToken;
 
     /// @notice Address of the project owner (multisig wallet)
     address public projectAddress;
@@ -167,26 +172,35 @@ contract DatasetManager is Ownable {
     error AlreadySet();
     error InvalidAmount();
     error TrialQuotaExceeded();
+    error AlreadyInitialized();
 
-    // ========== Constructor ==========
+    // ========== Constructor (for implementation contract) ==========
+
+    constructor() Ownable(msg.sender) {}
+
+    // ========== Initializer ==========
 
     /**
-     * @notice Initializes the DatasetManager contract
+     * @notice Initializes the cloned DatasetManager
      * @param datasetToken_ Address of the associated DatasetToken
      * @param projectAddress_ Address of the project owner
-     * @param initialOwner_ Initial owner of this contract
+     * @param initialOwner_ Initial owner of this contract (usually Factory)
      * @param metadataURI_ Initial IPFS URI of dataset metadata
      */
-    constructor(
+    function initialize(
         address datasetToken_,
         address projectAddress_,
         address initialOwner_,
         string memory metadataURI_
-    ) Ownable(initialOwner_) {
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
+
         if (datasetToken_ == address(0) || projectAddress_ == address(0))
             revert ZeroAddress();
         if (bytes(metadataURI_).length == 0) revert EmptyString();
 
+        _transferOwnership(initialOwner_);
         datasetToken = datasetToken_;
         projectAddress = projectAddress_;
         datasetMetadataURI = metadataURI_;

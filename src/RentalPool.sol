@@ -19,13 +19,18 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 contract RentalPool is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    // ========== Initialization Guard ==========
+
+    /// @notice Prevents reinitialization
+    bool private _initialized;
+
     // ========== State Variables ==========
 
     /// @notice USDC token contract
-    IERC20 public immutable usdc;
+    IERC20 public usdc;
 
     /// @notice Associated dataset token contract
-    address public immutable datasetToken;
+    address public datasetToken;
 
     /// @notice Precision multiplier for calculations (1e18)
     uint256 public constant PRECISION = 1e18;
@@ -82,23 +87,32 @@ contract RentalPool is Ownable, ReentrancyGuard {
     error NoSupply();
     error NoPendingDividends();
     error InsufficientBalance();
+    error AlreadyInitialized();
 
-    // ========== Constructor ==========
+    // ========== Constructor (for implementation contract) ==========
+
+    constructor() Ownable(msg.sender) {}
+
+    // ========== Initializer ==========
 
     /**
-     * @notice Initializes the RentalPool
+     * @notice Initializes the cloned RentalPool
      * @param usdc_ USDC token address
      * @param datasetToken_ Dataset token address
-     * @param initialOwner_ Initial owner address
+     * @param initialOwner_ Initial owner address (usually Factory)
      */
-    constructor(
+    function initialize(
         address usdc_,
         address datasetToken_,
         address initialOwner_
-    ) Ownable(initialOwner_) {
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
+        _initialized = true;
+
         if (usdc_ == address(0) || datasetToken_ == address(0))
             revert ZeroAddress();
 
+        _transferOwnership(initialOwner_);
         usdc = IERC20(usdc_);
         datasetToken = datasetToken_;
     }

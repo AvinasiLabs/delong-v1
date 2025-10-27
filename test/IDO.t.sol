@@ -15,17 +15,19 @@ contract IDOTest is DeLongTestBase {
     function setUp() public override {
         super.setUp();
 
-        // Deploy DatasetToken (mint total supply to owner first, then transfer to IDO)
-        datasetToken = new DatasetToken(
+        // Deploy DatasetToken
+        datasetToken = new DatasetToken();
+        datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
-            owner,
+            address(0x1234), // Temporary IDO address, will transfer to actual IDO later
             TOTAL_SUPPLY
         );
 
         // Deploy other contracts
-        datasetManager = new DatasetManager(
+        datasetManager = new DatasetManager();
+        datasetManager.initialize(
             address(datasetToken),
             projectAddress,
             owner,
@@ -35,7 +37,8 @@ contract IDOTest is DeLongTestBase {
         daoTreasury = new DAOTreasury(address(usdc), owner);
 
         // Deploy IDO
-        ido = new IDO(
+        ido = new IDO();
+        ido.initialize(
             ALPHA_PROJECT,
             K,
             BETA_LP,
@@ -49,10 +52,12 @@ contract IDOTest is DeLongTestBase {
             address(rentalManager)
         );
 
-        // Set IDO as frozen exempt before transferring ownership
+        // Set IDO and temporary address as frozen exempt
         datasetToken.addFrozenExempt(address(ido));
+        datasetToken.addFrozenExempt(address(0x1234));
 
-        // Transfer all tokens to IDO
+        // Transfer all tokens from temporary address to IDO
+        vm.prank(address(0x1234));
         datasetToken.transfer(address(ido), TOTAL_SUPPLY);
 
         // Transfer token ownership to IDO

@@ -11,12 +11,13 @@ contract DatasetTokenTest is DeLongTestBase {
 
         // Deploy DatasetToken with frozen state
         idoContract = makeAddr("idoContract");
-        datasetToken = new DatasetToken(
+        datasetToken = new DatasetToken();
+        datasetToken.initialize(
             "Test Dataset Token",
             "TDT",
             owner,
             idoContract,
-            1_000_000 * 10 ** 18 // 1M tokens
+            1_000_000 * 10 ** 18 // 1M tokens - minted directly to idoContract
         );
 
         vm.label(address(datasetToken), "DatasetToken");
