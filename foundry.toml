@@ -15,6 +15,9 @@ verbosity = 3
 fuzz_runs = 256
 ffi = false
 
+# File system permissions for deployment scripts
+fs_permissions = [{ access = "read-write", path = "./" }]
+
 # Gas reports
 gas_reports = ["*"]
 

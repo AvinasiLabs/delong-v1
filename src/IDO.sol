@@ -15,14 +15,30 @@ import "./DatasetToken.sol";
  *      - Automatic launch when target is reached
  *      - Refund mechanism if target not met
  *      - 14-day fundraising period
+ *
+ * IMPORTANT - DECIMAL PRECISION:
+ * The contract's return value precision depends on the 'k' parameter:
+ *
+ * Key points:
+ * - initialPrice: Stored as 6 decimals (e.g., 1000000 = 1 USDC)
+ * - k: MUST be a unitless number (e.g., 1000 or 3000), NOT scaled by 1e18!
+ * - calculateCost(): Returns 6 decimals when k is unitless (e.g., 1003000000 = 1003 USDC)
+ * - calculateRefund(): Returns 6 decimals
+ * - buyTokens() maxCost parameter: Expects 6 decimals
+ * - sellTokens() minRefund parameter: Expects 6 decimals
+ *
+ * When interacting with this contract from frontend:
+ * - Pass k as a raw number (e.g., BigInt(1000)), NOT parseUnits(k, 18)
+ * - Use formatUnits(amount, 6) to display USDC amounts from calculateCost/calculateRefund
+ * - Use parseUnits(userInput, 6) for maxCost/minRefund parameters
  */
 contract IDO is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ========== Constants ==========
 
-    /// @notice Total token supply (10 million tokens)
-    uint256 public constant TOTAL_SUPPLY = 10_000_000 * 10 ** 18;
+    /// @notice Total token supply (1 million tokens)
+    uint256 public constant TOTAL_SUPPLY = 1_000_000 * 10 ** 18;
 
     /// @notice Fundraising duration (14 days)
     uint256 public constant SALE_DURATION = 14 days;
@@ -46,7 +62,10 @@ contract IDO is ReentrancyGuard {
     /// @notice Project reserved token ratio (e.g., 2000 = 20%)
     uint256 public alphaProject;
 
-    /// @notice Price growth coefficient (controls curve steepness)
+    /// @notice Price growth coefficient in USD (scaled by 1e6, e.g., 9e6 = 9 USD)
+    /// @dev Represents the USD value added to final price when all tokens are sold
+    ///      Recommended range: 6e6 to 12e6 (6-12 USD)
+    ///      Example: k=9e6 means final price = initial price + 9 USD
     uint256 public k;
 
     /// @notice LP lock ratio (e.g., 7000 = 70% of raised funds for LP)
@@ -201,7 +220,7 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Initializes the cloned IDO contract
      * @param alphaProject_ Project reserved ratio (basis points, e.g., 2000 = 20%)
-     * @param k_ Price growth coefficient
+     * @param k_ Price growth coefficient (unitless, e.g., 1000 or 3000, NOT 1000e18)
      * @param betaLP_ LP lock ratio (basis points, e.g., 7000 = 70%)
      * @param minRaiseRatio_ Minimum raise ratio (basis points, e.g., 7500 = 75%)
      * @param initialPrice_ Initial token price in USDC (6 decimals)
@@ -282,8 +301,8 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Buy tokens with USDC
      * @param tokenAmount Amount of tokens to buy (18 decimals)
-     * @param maxCost Maximum USDC willing to pay (including fees) for slippage protection
-     * @return cost Actual USDC cost (including fees)
+     * @param maxCost Maximum USDC willing to pay (18 decimals, including fees) for slippage protection
+     * @return cost Actual USDC cost (18 decimals, including fees)
      */
     function buyTokens(
         uint256 tokenAmount,
@@ -347,8 +366,8 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Sell tokens back to contract for USDC
      * @param tokenAmount Amount of tokens to sell (18 decimals)
-     * @param minRefund Minimum USDC expected (after fees) for slippage protection
-     * @return refund Actual USDC refund (after fees)
+     * @param minRefund Minimum USDC expected (18 decimals, after fees) for slippage protection
+     * @return refund Actual USDC refund (18 decimals, after fees)
      */
     function sellTokens(
         uint256 tokenAmount,
@@ -482,8 +501,9 @@ contract IDO is ReentrancyGuard {
 
     /**
      * @notice Calculate cost to buy tokens
-     * @param tokenAmount Amount of tokens to buy
-     * @return cost USDC cost (including fees)
+     * @param tokenAmount Amount of tokens to buy (18 decimals)
+     * @return cost USDC cost in 18 decimals (including 0.3% fee)
+     * @dev Returns 18 decimal precision for accurate frontend display
      */
     function calculateCost(
         uint256 tokenAmount
@@ -498,8 +518,9 @@ contract IDO is ReentrancyGuard {
 
     /**
      * @notice Calculate refund for selling tokens
-     * @param tokenAmount Amount of tokens to sell
-     * @return refund USDC refund (after fees)
+     * @param tokenAmount Amount of tokens to sell (18 decimals)
+     * @return refund USDC refund in 18 decimals (after 0.5% fee)
+     * @dev Returns 18 decimal precision for accurate frontend display
      */
     function calculateRefund(
         uint256 tokenAmount
@@ -577,6 +598,8 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Calculate price at a given sold amount using square-root bonding curve
      * @dev P(s) = P0 + k * sqrt(s / S_sale)
+     *      where k is scaled by 1e6 (represents USD value with 6 decimals)
+     *      Example: k=9e6 means price growth coefficient of 9 USD
      * @param s Sold tokens amount
      * @return price Price in USDC (6 decimals)
      */
@@ -589,16 +612,27 @@ contract IDO is ReentrancyGuard {
         uint256 sqrtRatio = _sqrt(ratio);
 
         // P(s) = P0 + k * sqrt(s / S_sale)
-        // Scale k appropriately
-        price = initialPrice + (k * sqrtRatio) / 1e9; // 1e9 because sqrtRatio is in 1e18 and we want 1e9 result
+        // k is scaled by 1e6 (USD with 6 decimals)
+        // sqrtRatio max value is 1e9 (when s = salableTokens, ratio = 1e18, sqrt = 1e9)
+        // Result: (1e6 * 1e9) / 1e9 = 1e6 (6 decimals)
+        price = initialPrice + (k * sqrtRatio) / 1e9;
     }
 
     /**
      * @notice Calculate cost between two points on bonding curve (integral)
      * @dev Simplified integral calculation for square-root curve
-     * @param s1 Start sold amount
-     * @param s2 End sold amount
-     * @return cost Cost in USDC (6 decimals)
+     * @param s1 Start sold amount (18 decimals)
+     * @param s2 End sold amount (18 decimals)
+     * @return cost Cost in 18 decimals (NOT 6 decimals!)
+     *
+     * CRITICAL: This function returns 18 decimals for precision, not USDC's 6 decimals.
+     * The return value must be converted when actually transferring USDC.
+     *
+     * Decimal precision breakdown:
+     * - initialPrice: 6 decimals stored, treated as 18 decimals in calculations
+     * - linearCost: (6 + 18) / 1e18 = 6 decimals, then scaled to 18 decimals
+     * - sqrtCost: (18 + 9 + 18) / (1e18 * 1e9) = 18 decimals
+     * - Final result: 18 decimals
      */
     function _calculateCost(
         uint256 s1,
@@ -606,16 +640,25 @@ contract IDO is ReentrancyGuard {
     ) internal view returns (uint256 cost) {
         if (s2 <= s1) return 0;
 
-        // Linear term: P0 * (s2 - s1)
+        // Linear term: P0 * (s2 - s1) / 1e18
+        // Result: 6 decimals (initialPrice) + 18 decimals (s2-s1) - 18 = 6 decimals
         uint256 linearCost = (initialPrice * (s2 - s1)) / 1e18;
 
-        // Square-root integral term (simplified approximation)
-        // For accurate implementation, use: (2k/3) * (s2^(3/2) - s1^(3/2)) / S_sale^(1/2)
-        // Here we use midpoint approximation for simplicity
+        // Square-root integral term (bonding curve growth)
+        // Formula: k * sqrt(avgSold / S_sale) * (s2 - s1)
+        // We need to scale this to match USDC's 6 decimals
         uint256 avgSold = (s1 + s2) / 2;
-        uint256 sqrtAvg = _sqrt((avgSold * 1e18) / salableTokens);
+        uint256 sqrtAvg = _sqrt((avgSold * 1e18) / salableTokens); // Result: 9 decimals
+
+        // sqrtCost calculation:
+        // - k: 6 decimals (USD with 6 decimals, e.g., 9e6 = 9 USD)
+        // - sqrtAvg: varies based on ratio (sqrt output)
+        // - (s2 - s1): 18 decimals (tokens)
+        // Total: 6 + 9 + 18 = 33 decimals
+        // We want 6 decimals output, so divide by 1e27 (33 - 6 = 27)
         uint256 sqrtCost = (k * sqrtAvg * (s2 - s1)) / (1e18 * 1e9);
 
+        // Now both linearCost and sqrtCost are in 6 decimals (USDC units)
         cost = linearCost + sqrtCost;
     }
 

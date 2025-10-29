@@ -66,7 +66,7 @@ contract IntegrationTest is DeLongTestBase {
         // ========== Step 1: Deploy Dataset via Factory ==========
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000, // 20% reserved for project
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000, // 70% for LP
             minRaiseRatio: 7500, // 75% target
             initialPrice: 1 * 10 ** 6 // 1 USDC
@@ -105,23 +105,23 @@ contract IntegrationTest is DeLongTestBase {
         IDO ido = IDO(idoAddr);
         DatasetToken token = DatasetToken(datasetTokenAddr);
 
-        // User1 buys 50,000 tokens
+        // User1 buys 50,000 tokens (with new k=9e6, need higher maxCost)
         vm.prank(user1);
-        usdc.approve(idoAddr, 100_000 * 10 ** 6);
+        usdc.approve(idoAddr, 150_000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(50_000 * 10 ** 18, 100_000 * 10 ** 6);
+        ido.buyTokens(50_000 * 10 ** 18, 150_000 * 10 ** 6);
 
-        // User2 buys 50,000 tokens
+        // User2 buys 50,000 tokens (with new k=9e6, need higher maxCost)
         vm.prank(user2);
-        usdc.approve(idoAddr, 100_000 * 10 ** 6);
+        usdc.approve(idoAddr, 200_000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user2);
-        ido.buyTokens(50_000 * 10 ** 18, 100_000 * 10 ** 6);
+        ido.buyTokens(50_000 * 10 ** 18, 200_000 * 10 ** 6);
 
-        // User3 buys 50,000 tokens
+        // User3 buys 50,000 tokens (price is even higher after user2)
         vm.prank(user3);
-        usdc.approve(idoAddr, 100_000 * 10 ** 6);
+        usdc.approve(idoAddr, 300_000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user3);
-        ido.buyTokens(50_000 * 10 ** 18, 100_000 * 10 ** 6);
+        ido.buyTokens(50_000 * 10 ** 18, 300_000 * 10 ** 6);
 
         // Check users received tokens
         assertGt(token.balanceOf(user1), 0, "User1 should have tokens");
@@ -237,7 +237,7 @@ contract IntegrationTest is DeLongTestBase {
         // Deploy dataset
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6
@@ -304,7 +304,7 @@ contract IntegrationTest is DeLongTestBase {
     function test_MultipleDatasets() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6

@@ -7,9 +7,9 @@ dataSources:
     name: Factory
     network: sepolia
     source:
-      address: "0xe78313C3ea55886083ba849CeE446B6CE5395f98"
+      address: "0xE284732Ee1872e2693c0d4B2B9e601Bb76576216"
       abi: Factory
-      startBlock: 7100000 # Sepolia deployment block (approximate)
+      startBlock: 9514000
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -29,9 +29,9 @@ dataSources:
     name: RentalManager
     network: sepolia
     source:
-      address: "0x393200F05F2041466d6f78b54535033E1bA4A87e"
+      address: "0xD0cf7e8CcED7515B1CfCF8890C6FFDB52A1692BF"
       abi: RentalManager
-      startBlock: 7100000 # Sepolia deployment block (approximate)
+      startBlock: 9514000
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -66,9 +66,9 @@ dataSources:
     name: DAOTreasury
     network: sepolia
     source:
-      address: "0x7E4Cc6881005dc0Ef6a42c2737517cc55caADf35"
+      address: "0xaFfE0142BA95CC12DF7ed330af1e55C67333D391"
       abi: DAOTreasury
-      startBlock: 7100000 # Sepolia deployment block (approximate)
+      startBlock: 9514000
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -97,9 +97,9 @@ dataSources:
     name: DAOGovernance
     network: sepolia
     source:
-      address: "0xA7cBDC71A74080c79825c83fEEEF65dEE0366F43"
+      address: "0xC6a5C25fCcB5037709019EF2cc49EA986bFEb950"
       abi: DAOGovernance
-      startBlock: 7100000 # Sepolia deployment block (approximate)
+      startBlock: 9514000
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7

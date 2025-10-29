@@ -57,7 +57,7 @@ contract FactoryTest is DeLongTestBase {
         // Prepare deployment parameters
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000, // 20%
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000, // 70%
             minRaiseRatio: 7500, // 75%
             initialPrice: 1 * 10 ** 6 // 1 USDC
@@ -74,14 +74,14 @@ contract FactoryTest is DeLongTestBase {
             config
         );
 
-        assertEq(datasetId, 0, "First dataset ID should be 0");
+        assertEq(datasetId, 1, "First dataset ID should be 1");
         assertEq(factory.datasetCount(), 1, "Dataset count should be 1");
     }
 
     function test_DeployDatasetCreatesAllContracts() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6
@@ -125,7 +125,7 @@ contract FactoryTest is DeLongTestBase {
     function test_GetDatasetById() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6
@@ -151,7 +151,7 @@ contract FactoryTest is DeLongTestBase {
     function test_MultipleDatasetDeployment() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6
@@ -199,7 +199,7 @@ contract FactoryTest is DeLongTestBase {
         // Deploy one dataset
         Factory.IDOConfig memory config = Factory.IDOConfig({
             alphaProject: 2000,
-            k: 1000,
+            k: 9 * 10 ** 6, // 9 USD
             betaLP: 7000,
             minRaiseRatio: 7500,
             initialPrice: 1 * 10 ** 6

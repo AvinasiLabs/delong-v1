@@ -126,7 +126,7 @@ contract Factory is Ownable {
         );
 
         datasetId = ++datasetCount;
-        uint256 supply = 10_000_000 * 10 ** 18; // 10 million tokens as per spec
+        uint256 supply = 1_000_000 * 10 ** 18; // 1 million tokens as per spec
 
         // Clone implementation contracts
         address token = Clones.clone(tokenImplementation);

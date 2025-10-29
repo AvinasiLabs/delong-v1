@@ -6,11 +6,11 @@ import "./TestBase.sol";
 contract IDOTest is DeLongTestBase {
     // IDO parameters
     uint256 constant ALPHA_PROJECT = 2000; // 20%
-    uint256 constant K = 1000;
+    uint256 constant K = 9 * 10 ** 6; // 9 USD (price growth coefficient)
     uint256 constant BETA_LP = 7000; // 70%
     uint256 constant MIN_RAISE_RATIO = 7500; // 75%
     uint256 constant INITIAL_PRICE = 1 * 10 ** 6; // 1 USDC
-    uint256 constant TOTAL_SUPPLY = 10_000_000 * 10 ** 18;
+    uint256 constant TOTAL_SUPPLY = 1_000_000 * 10 ** 18;
 
     function setUp() public override {
         super.setUp();
@@ -113,7 +113,7 @@ contract IDOTest is DeLongTestBase {
 
     function test_BuyTokens() public {
         uint256 tokenAmount = 1000 * 10 ** 18;
-        uint256 maxCost = 2000 * 10 ** 6; // 2000 USDC max
+        uint256 maxCost = 5000 * 10 ** 6; // 5000 USDC max (with new k=9e6)
 
         // Approve USDC
         vm.prank(user1);
@@ -139,7 +139,7 @@ contract IDOTest is DeLongTestBase {
 
     function test_BuyTokensMultipleTimes() public {
         uint256 tokenAmount = 500 * 10 ** 18;
-        uint256 maxCost = 1000 * 10 ** 6;
+        uint256 maxCost = 3000 * 10 ** 6; // 3000 USDC max (with new k=9e6)
 
         // User1 buys
         vm.prank(user1);
@@ -172,9 +172,9 @@ contract IDOTest is DeLongTestBase {
         // Buy first
         uint256 tokenAmount = 1000 * 10 ** 18;
         vm.prank(user1);
-        usdc.approve(address(ido), 10000 * 10 ** 6);
+        usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(tokenAmount, 10000 * 10 ** 6);
+        ido.buyTokens(tokenAmount, 5000 * 10 ** 6);
 
         // Sell half
         uint256 sellAmount = 500 * 10 ** 18;
@@ -247,9 +247,9 @@ contract IDOTest is DeLongTestBase {
 
         // Buy some tokens
         vm.prank(user1);
-        usdc.approve(address(ido), 10000 * 10 ** 6);
+        usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(1000 * 10 ** 18, 10000 * 10 ** 6);
+        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
 
         // Price should increase
         uint256 price1 = ido.getCurrentPrice();
@@ -262,17 +262,17 @@ contract IDOTest is DeLongTestBase {
 
         // Buy some tokens
         vm.prank(user1);
-        usdc.approve(address(ido), 10000 * 10 ** 6);
+        usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(1000 * 10 ** 18, 10000 * 10 ** 6);
+        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
 
         uint256 price1 = ido.getCurrentPrice();
 
         // Buy more tokens
         vm.prank(user2);
-        usdc.approve(address(ido), 10000 * 10 ** 6);
+        usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user2);
-        ido.buyTokens(1000 * 10 ** 18, 10000 * 10 ** 6);
+        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
 
         uint256 price2 = ido.getCurrentPrice();
 
@@ -285,9 +285,9 @@ contract IDOTest is DeLongTestBase {
         // Buy tokens
         uint256 tokenAmount = 1000 * 10 ** 18;
         vm.prank(user1);
-        usdc.approve(address(ido), 10000 * 10 ** 6);
+        usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        uint256 cost = ido.buyTokens(tokenAmount, 10000 * 10 ** 6);
+        uint256 cost = ido.buyTokens(tokenAmount, 5000 * 10 ** 6);
 
         // IDO should have received USDC (minus fees)
         uint256 idoBalance = usdc.balanceOf(address(ido));
