@@ -10,15 +10,6 @@ import "./DatasetManager.sol";
 import "./RentalPool.sol";
 
 /**
- * @title IRentalManager
- * @notice Interface for RentalManager contract
- */
-interface IRentalManager {
-    function updatePrice(address datasetToken, uint256 newPricePerHour) external;
-    function setDatasetRentalPool(address datasetToken, address rentalPool) external;
-}
-
-/**
  * @title Factory
  * @notice Factory for deploying dataset contract suites using EIP-1167 minimal proxy pattern
  * @dev Size optimized (<24KB). Backend indexes via events. No on-chain registry.
@@ -54,6 +45,8 @@ contract Factory is Ownable {
     address public rentalManager;
     address public daoTreasury;
     address public protocolTreasury;
+    address public uniswapV2Router;
+    address public uniswapV2Factory;
     uint256 public datasetCount;
 
     // ========== Events ==========
@@ -170,7 +163,9 @@ contract Factory is Ownable {
             usdc,
             protocolTreasury,
             daoTreasury,
-            rentalManager
+            rentalManager,
+            uniswapV2Router,
+            uniswapV2Factory
         );
 
         // Tokens are already minted to IDO in initialize()
@@ -200,11 +195,15 @@ contract Factory is Ownable {
     function configure(
         address rentalManager_,
         address daoTreasury_,
-        address protocolTreasury_
+        address protocolTreasury_,
+        address uniswapV2Router_,
+        address uniswapV2Factory_
     ) external onlyOwner {
         if (rentalManager_ != address(0)) rentalManager = rentalManager_;
         if (daoTreasury_ != address(0)) daoTreasury = daoTreasury_;
         if (protocolTreasury_ != address(0)) protocolTreasury = protocolTreasury_;
+        if (uniswapV2Router_ != address(0)) uniswapV2Router = uniswapV2Router_;
+        if (uniswapV2Factory_ != address(0)) uniswapV2Factory = uniswapV2Factory_;
     }
 
     function setImplementations(

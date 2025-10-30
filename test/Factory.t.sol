@@ -18,7 +18,9 @@ contract FactoryTest is DeLongTestBase {
         factory.configure(
             address(rentalManager),
             address(daoTreasury),
-            protocolTreasury
+            protocolTreasury,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
         );
 
         // Configure shared contracts
@@ -177,7 +179,7 @@ contract FactoryTest is DeLongTestBase {
     function test_Configure() public {
         address newManager = makeAddr("newManager");
 
-        factory.configure(newManager, address(0), address(0));
+        factory.configure(newManager, address(0), address(0), address(0x1111111111111111111111111111111111111111), address(0x2222222222222222222222222222222222222222));
 
         assertEq(factory.rentalManager(), newManager, "Manager should be updated");
     }
@@ -190,7 +192,7 @@ contract FactoryTest is DeLongTestBase {
 
         vm.prank(user1);
         vm.expectRevert();
-        factory.configure(newManager, address(0), address(0));
+        factory.configure(newManager, address(0), address(0), address(0x1111111111111111111111111111111111111111), address(0x2222222222222222222222222222222222222222));
     }
 
     function test_DatasetCounter() public {

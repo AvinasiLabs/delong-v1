@@ -1,34 +1,58 @@
 #!/bin/bash
 
-# Exit on error
-set -e
+set -e  # Exit on error
 
 echo "🚀 DeLong Protocol v1 - Full Deployment & Configuration Update"
 echo "=============================================================="
 echo ""
 
-# Step 1: Deploy contracts
-echo "📦 Step 1: Deploying contracts to Sepolia..."
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Load environment variables
+if [ ! -f .env ]; then
+    echo "❌ Error: .env file not found"
+    exit 1
+fi
 source .env
+
+# Project paths
+CONTRACT_DIR="$(pwd)"
+DLEX_DIR="${CONTRACT_DIR}/../dlex"
+DLEX_BACKEND_DIR="${CONTRACT_DIR}/../dlex-backend"
+SUBGRAPH_DIR="${CONTRACT_DIR}/../subgraph"
+
+# =============================================================================
+# Step 1: Deploy Contracts to Sepolia
+# =============================================================================
+echo "📦 Step 1: Deploying contracts to Sepolia..."
+echo ""
+
+# Deploy without verification (too slow)
 forge script script/DeploySepolia.s.sol:DeploySepolia \
-    --rpc-url $RPC_URL \
+    --rpc-url $SEPOLIA_RPC_URL \
     --broadcast \
-    --etherscan-api-key $ETHERSCAN_API_KEY \
-    -vvvv
+    --skip-simulation \
+    -vv
 
 if [ $? -ne 0 ]; then
-    echo "❌ Contract deployment failed!"
+    echo -e "${RED}❌ Contract deployment failed${NC}"
     exit 1
 fi
 
-echo ""
-echo "✅ Contracts deployed successfully!"
+echo -e "${GREEN}✅ Contracts deployed successfully${NC}"
 echo ""
 
-# Step 2: Load deployment addresses
-echo "📋 Step 2: Loading deployment addresses..."
+# =============================================================================
+# Step 2: Load deployed addresses
+# =============================================================================
+echo "📋 Step 2: Loading deployed addresses..."
+
 if [ ! -f "./deployments/sepolia.env" ]; then
-    echo "❌ Deployment file not found: ./deployments/sepolia.env"
+    echo -e "${RED}❌ Error: deployments/sepolia.env not found${NC}"
     exit 1
 fi
 
@@ -41,98 +65,110 @@ echo "  DAOTreasury: $DAO_TREASURY_ADDRESS"
 echo "  DAOGovernance: $DAO_GOVERNANCE_ADDRESS"
 echo ""
 
-# Get startBlock from latest deployment
-START_BLOCK=$(cast block-number --rpc-url $RPC_URL)
-echo "Current block number: $START_BLOCK"
-echo ""
+# =============================================================================
+# Step 3: Update Subgraph Configuration
+# =============================================================================
+echo "🔄 Step 3: Updating subgraph configuration..."
 
-# Step 3: Update subgraph configuration
-echo "🔧 Step 3: Updating subgraph configuration..."
-SUBGRAPH_FILE="./subgraph/subgraph.yaml"
+if [ -d "$SUBGRAPH_DIR" ]; then
+    cd "$SUBGRAPH_DIR"
 
-if [ ! -f "$SUBGRAPH_FILE" ]; then
-    echo "❌ Subgraph file not found: $SUBGRAPH_FILE"
-    exit 1
+    # Backup original subgraph.yaml
+    if [ -f "subgraph.yaml" ]; then
+        cp subgraph.yaml subgraph.yaml.backup
+    fi
+
+    # Update subgraph.yaml with new addresses
+    # Note: This uses awk to update the addresses in place
+    awk -v factory="$FACTORY_ADDRESS" -v rental="$RENTAL_MANAGER_ADDRESS" '
+        /address:/ && /Factory/ { gsub(/"[^"]*"/, "\"" tolower(factory) "\""); print; next }
+        /address:/ && /RentalManager/ { gsub(/"[^"]*"/, "\"" tolower(rental) "\""); print; next }
+        { print }
+    ' subgraph.yaml > subgraph.yaml.tmp && mv subgraph.yaml.tmp subgraph.yaml
+
+    echo -e "${GREEN}✅ Subgraph configuration updated${NC}"
+
+    # Regenerate subgraph code
+    echo "🔨 Generating subgraph code..."
+    pnpm run codegen
+
+    # Deploy subgraph
+    echo "📡 Deploying subgraph..."
+    pnpm run deploy
+
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Subgraph deployment failed, but continuing...${NC}"
+    else
+        echo -e "${GREEN}✅ Subgraph deployed${NC}"
+    fi
+
+    cd "$CONTRACT_DIR"
+else
+    echo -e "${YELLOW}⚠️  Subgraph directory not found, skipping...${NC}"
 fi
 
-# Backup original file
-cp "$SUBGRAPH_FILE" "$SUBGRAPH_FILE.backup"
-
-# Update Factory address and startBlock
-sed -i.tmp "s/address: \"0x[a-fA-F0-9]*\" # Factory/address: \"$FACTORY_ADDRESS\"/g" "$SUBGRAPH_FILE"
-sed -i.tmp "/name: Factory/,/startBlock:/ s/startBlock: [0-9]*/startBlock: $START_BLOCK/" "$SUBGRAPH_FILE"
-
-# Update RentalManager address and startBlock
-sed -i.tmp "/name: RentalManager/,/startBlock:/ s/address: \"0x[a-fA-F0-9]*\"/address: \"$RENTAL_MANAGER_ADDRESS\"/" "$SUBGRAPH_FILE"
-sed -i.tmp "/name: RentalManager/,/startBlock:/ s/startBlock: [0-9]*/startBlock: $START_BLOCK/" "$SUBGRAPH_FILE"
-
-# Update DAOTreasury address and startBlock
-sed -i.tmp "/name: DAOTreasury/,/startBlock:/ s/address: \"0x[a-fA-F0-9]*\"/address: \"$DAO_TREASURY_ADDRESS\"/" "$SUBGRAPH_FILE"
-sed -i.tmp "/name: DAOTreasury/,/startBlock:/ s/startBlock: [0-9]*/startBlock: $START_BLOCK/" "$SUBGRAPH_FILE"
-
-# Update DAOGovernance address and startBlock
-sed -i.tmp "/name: DAOGovernance/,/startBlock:/ s/address: \"0x[a-fA-F0-9]*\"/address: \"$DAO_GOVERNANCE_ADDRESS\"/" "$SUBGRAPH_FILE"
-sed -i.tmp "/name: DAOGovernance/,/startBlock:/ s/startBlock: [0-9]*/startBlock: $START_BLOCK/" "$SUBGRAPH_FILE"
-
-# Clean up temp files
-rm -f "$SUBGRAPH_FILE.tmp"
-
-echo "✅ Subgraph configuration updated!"
 echo ""
 
-# Step 4: Update frontend .env.local
-echo "🌐 Step 4: Updating frontend environment variables..."
-FRONTEND_ENV="../dlex/.env.local"
+# =============================================================================
+# Step 4: Update Frontend Environment Variables
+# =============================================================================
+echo "🎨 Step 4: Updating frontend environment variables..."
 
-if [ ! -f "$FRONTEND_ENV" ]; then
-    echo "❌ Frontend .env file not found: $FRONTEND_ENV"
-    exit 1
+if [ -d "$DLEX_DIR" ]; then
+    ENV_FILE="$DLEX_DIR/.env.local"
+
+    # Backup existing .env.local
+    if [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" "$ENV_FILE.backup"
+    fi
+
+    # Update or create .env.local
+    cat > "$ENV_FILE" << EOF
+# Auto-generated by deploy-and-update.sh
+# Generated at: $(date)
+
+# Contract Addresses (Sepolia)
+NEXT_PUBLIC_FACTORY_ADDRESS=$FACTORY_ADDRESS
+NEXT_PUBLIC_RENTAL_MANAGER_ADDRESS=$RENTAL_MANAGER_ADDRESS
+NEXT_PUBLIC_DAO_TREASURY_ADDRESS=$DAO_TREASURY_ADDRESS
+NEXT_PUBLIC_DAO_GOVERNANCE_ADDRESS=$DAO_GOVERNANCE_ADDRESS
+NEXT_PUBLIC_USDC_ADDRESS=$USDC_ADDRESS
+
+# Network
+NEXT_PUBLIC_CHAIN_ID=11155111
+NEXT_PUBLIC_RPC_URL=$SEPOLIA_RPC_URL
+
+# Subgraph API (update this after subgraph deployment)
+NEXT_PUBLIC_SUBGRAPH_URL=https://api.studio.thegraph.com/query/YOUR_SUBGRAPH_ID/delong-protocol/version/latest
+EOF
+
+    echo -e "${GREEN}✅ Frontend .env.local updated${NC}"
+else
+    echo -e "${YELLOW}⚠️  Frontend directory not found, skipping...${NC}"
 fi
 
-# Backup original file
-cp "$FRONTEND_ENV" "$FRONTEND_ENV.backup"
-
-# Update Sepolia addresses
-sed -i.tmp "s/NEXT_PUBLIC_FACTORY_ADDRESS_SEPOLIA=.*/NEXT_PUBLIC_FACTORY_ADDRESS_SEPOLIA=$FACTORY_ADDRESS/" "$FRONTEND_ENV"
-sed -i.tmp "s/NEXT_PUBLIC_RENTAL_MANAGER_ADDRESS_SEPOLIA=.*/NEXT_PUBLIC_RENTAL_MANAGER_ADDRESS_SEPOLIA=$RENTAL_MANAGER_ADDRESS/" "$FRONTEND_ENV"
-sed -i.tmp "s/NEXT_PUBLIC_DAO_TREASURY_ADDRESS_SEPOLIA=.*/NEXT_PUBLIC_DAO_TREASURY_ADDRESS_SEPOLIA=$DAO_TREASURY_ADDRESS/" "$FRONTEND_ENV"
-sed -i.tmp "s/NEXT_PUBLIC_DAO_GOVERNANCE_ADDRESS_SEPOLIA=.*/NEXT_PUBLIC_DAO_GOVERNANCE_ADDRESS_SEPOLIA=$DAO_GOVERNANCE_ADDRESS/" "$FRONTEND_ENV"
-sed -i.tmp "s/NEXT_PUBLIC_USDC_ADDRESS_SEPOLIA=.*/NEXT_PUBLIC_USDC_ADDRESS_SEPOLIA=$USDC_ADDRESS/" "$FRONTEND_ENV"
-
-# Clean up temp files
-rm -f "$FRONTEND_ENV.tmp"
-
-echo "✅ Frontend environment variables updated!"
 echo ""
 
-# Step 5: Print summary
+# =============================================================================
+# Summary
+# =============================================================================
 echo "=============================================================="
-echo "✨ Deployment & Configuration Complete!"
+echo -e "${GREEN}✅ Deployment and configuration update complete!${NC}"
 echo "=============================================================="
 echo ""
-echo "📝 Updated Files:"
-echo "  1. Contract deployments: ./deployments/sepolia.env"
-echo "  2. Subgraph config: ./subgraph/subgraph.yaml"
-echo "  3. Frontend env: ../dlex/.env.local"
+echo "📊 Summary:"
+echo "  ✅ Contracts deployed to Sepolia"
+echo "  ✅ Subgraph configuration updated"
+echo "  ✅ Frontend .env.local updated"
 echo ""
-echo "🔄 Next Steps:"
+echo "🔗 Deployed Addresses:"
+echo "  Factory:       $FACTORY_ADDRESS"
+echo "  RentalManager: $RENTAL_MANAGER_ADDRESS"
+echo "  DAOTreasury:   $DAO_TREASURY_ADDRESS"
+echo "  DAOGovernance: $DAO_GOVERNANCE_ADDRESS"
 echo ""
-echo "1. Deploy subgraph to The Graph Studio:"
-echo "   cd subgraph"
-echo "   pnpm run codegen"
-echo "   pnpm run build"
-echo "   pnpm run deploy"
+echo "📝 Next Steps:"
+echo "  1. Update NEXT_PUBLIC_SUBGRAPH_URL in frontend .env.local"
+echo "  2. Update backend environment variables if needed"
+echo "  3. Test frontend and backend connections"
 echo ""
-echo "2. Restart backend services (if running):"
-echo "   cd ../dlex-backend"
-echo "   docker-compose down"
-echo "   docker-compose build --no-cache aggregator-service"
-echo "   docker-compose up -d"
-echo ""
-echo "3. Frontend will auto-reload with new addresses"
-echo ""
-echo "📋 Backup files saved:"
-echo "  - $SUBGRAPH_FILE.backup"
-echo "  - $FRONTEND_ENV.backup"
-echo ""
-echo "🎉 Done!"

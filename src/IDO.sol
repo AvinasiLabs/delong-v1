@@ -7,6 +7,50 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./DatasetToken.sol";
 
 /**
+ * @title IUniswapV2Factory
+ * @notice Uniswap V2 Factory interface for creating pairs
+ */
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+}
+
+/**
+ * @title IUniswapV2Router02
+ * @notice Uniswap V2 Router interface for adding liquidity
+ */
+interface IUniswapV2Router02 {
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+}
+
+/**
+ * @title IRentalManager
+ * @notice RentalManager interface
+ */
+interface IRentalManager {
+    function lockLP(
+        address datasetToken,
+        address lpToken,
+        uint256 amount,
+        uint256 lpValueUSDC,
+        address projectAddress
+    ) external;
+
+    function updatePrice(address datasetToken, uint256 newPricePerHour) external;
+
+    function setDatasetRentalPool(address datasetToken, address rentalPool) external;
+}
+
+/**
  * @title IDO
  * @notice Initial Dataset Offering with Bonding Curve pricing
  * @dev Implements:
@@ -21,14 +65,14 @@ import "./DatasetToken.sol";
  *
  * Key points:
  * - initialPrice: Stored as 6 decimals (e.g., 1000000 = 1 USDC)
- * - k: MUST be a unitless number (e.g., 1000 or 3000), NOT scaled by 1e18!
- * - calculateCost(): Returns 6 decimals when k is unitless (e.g., 1003000000 = 1003 USDC)
+ * - k: MUST be a unitless integer (e.g., 3, 9, or 12), NOT scaled by any decimals!
+ * - calculateCost(): Returns 6 decimals (e.g., 1070000000 = 1070 USDC)
  * - calculateRefund(): Returns 6 decimals
  * - buyTokens() maxCost parameter: Expects 6 decimals
  * - sellTokens() minRefund parameter: Expects 6 decimals
  *
  * When interacting with this contract from frontend:
- * - Pass k as a raw number (e.g., BigInt(1000)), NOT parseUnits(k, 18)
+ * - Pass k as a raw integer (e.g., BigInt(3) or BigInt(9)), NOT parseUnits(k, 18) or parseUnits(k, 6)
  * - Use formatUnits(amount, 6) to display USDC amounts from calculateCost/calculateRefund
  * - Use parseUnits(userInput, 6) for maxCost/minRefund parameters
  */
@@ -62,10 +106,11 @@ contract IDO is ReentrancyGuard {
     /// @notice Project reserved token ratio (e.g., 2000 = 20%)
     uint256 public alphaProject;
 
-    /// @notice Price growth coefficient in USD (scaled by 1e6, e.g., 9e6 = 9 USD)
+    /// @notice Price growth coefficient (unitless integer, e.g., 3, 9, or 12)
     /// @dev Represents the USD value added to final price when all tokens are sold
-    ///      Recommended range: 6e6 to 12e6 (6-12 USD)
-    ///      Example: k=9e6 means final price = initial price + 9 USD
+    ///      Recommended range: 6 to 12
+    ///      Example: k=9 means final price = initial price + 9 USD
+    ///      Frontend should pass raw integer (e.g., BigInt(9)), NOT scaled by 1e18 or 1e6
     uint256 public k;
 
     /// @notice LP lock ratio (e.g., 7000 = 70% of raised funds for LP)
@@ -94,6 +139,15 @@ contract IDO is ReentrancyGuard {
 
     /// @notice Rental Manager address (receives LP tokens)
     address public rentalManager;
+
+    /// @notice Uniswap V2 Router address
+    address public uniswapV2Router;
+
+    /// @notice Uniswap V2 Factory address
+    address public uniswapV2Factory;
+
+    /// @notice Created liquidity pair address
+    address public liquidityPair;
 
     // ========== Derived Values ==========
 
@@ -176,6 +230,16 @@ contract IDO is ReentrancyGuard {
     );
 
     /**
+     * @notice Emitted when liquidity is added to Uniswap
+     */
+    event LiquidityAdded(
+        address indexed pair,
+        uint256 usdcAmount,
+        uint256 tokenAmount,
+        uint256 lpTokens
+    );
+
+    /**
      * @notice Emitted when IDO fails
      */
     event IDOFailed(
@@ -220,7 +284,7 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Initializes the cloned IDO contract
      * @param alphaProject_ Project reserved ratio (basis points, e.g., 2000 = 20%)
-     * @param k_ Price growth coefficient (unitless, e.g., 1000 or 3000, NOT 1000e18)
+     * @param k_ Price growth coefficient (unitless integer, e.g., 3, 9, or 12, NOT scaled by any decimals)
      * @param betaLP_ LP lock ratio (basis points, e.g., 7000 = 70%)
      * @param minRaiseRatio_ Minimum raise ratio (basis points, e.g., 7500 = 75%)
      * @param initialPrice_ Initial token price in USDC (6 decimals)
@@ -230,6 +294,8 @@ contract IDO is ReentrancyGuard {
      * @param protocolTreasury_ Protocol treasury address
      * @param daoTreasury_ DAO treasury address
      * @param rentalManager_ Rental manager address
+     * @param uniswapV2Router_ Uniswap V2 Router address
+     * @param uniswapV2Factory_ Uniswap V2 Factory address
      */
     function initialize(
         uint256 alphaProject_,
@@ -242,7 +308,9 @@ contract IDO is ReentrancyGuard {
         address usdcToken_,
         address protocolTreasury_,
         address daoTreasury_,
-        address rentalManager_
+        address rentalManager_,
+        address uniswapV2Router_,
+        address uniswapV2Factory_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         _initialized = true;
@@ -254,7 +322,9 @@ contract IDO is ReentrancyGuard {
             usdcToken_ == address(0) ||
             protocolTreasury_ == address(0) ||
             daoTreasury_ == address(0) ||
-            rentalManager_ == address(0)
+            rentalManager_ == address(0) ||
+            uniswapV2Router_ == address(0) ||
+            uniswapV2Factory_ == address(0)
         ) {
             revert ZeroAddress();
         }
@@ -282,6 +352,8 @@ contract IDO is ReentrancyGuard {
         protocolTreasury = protocolTreasury_;
         daoTreasury = daoTreasury_;
         rentalManager = rentalManager_;
+        uniswapV2Router = uniswapV2Router_;
+        uniswapV2Factory = uniswapV2Factory_;
 
         // Calculate derived values
         projectTokens = (TOTAL_SUPPLY * alphaProject_) / FEE_DENOMINATOR;
@@ -598,8 +670,8 @@ contract IDO is ReentrancyGuard {
     /**
      * @notice Calculate price at a given sold amount using square-root bonding curve
      * @dev P(s) = P0 + k * sqrt(s / S_sale)
-     *      where k is scaled by 1e6 (represents USD value with 6 decimals)
-     *      Example: k=9e6 means price growth coefficient of 9 USD
+     *      where k is a unitless integer (e.g., 3, 9, 12)
+     *      Example: k=9 means price increases by 9 USD when all tokens are sold
      * @param s Sold tokens amount
      * @return price Price in USDC (6 decimals)
      */
@@ -612,10 +684,10 @@ contract IDO is ReentrancyGuard {
         uint256 sqrtRatio = _sqrt(ratio);
 
         // P(s) = P0 + k * sqrt(s / S_sale)
-        // k is scaled by 1e6 (USD with 6 decimals)
-        // sqrtRatio max value is 1e9 (when s = salableTokens, ratio = 1e18, sqrt = 1e9)
-        // Result: (1e6 * 1e9) / 1e9 = 1e6 (6 decimals)
-        price = initialPrice + (k * sqrtRatio) / 1e9;
+        // k is unitless (e.g., 3 means 3 USD), sqrtRatio has 9 decimals
+        // We need to scale k to USDC precision (6 decimals) and multiply with sqrtRatio
+        // Result: k * 1e6 * sqrtRatio / 1e9 = k * sqrtRatio / 1e3
+        price = initialPrice + (k * sqrtRatio) / 1e3;
     }
 
     /**
@@ -648,15 +720,17 @@ contract IDO is ReentrancyGuard {
         // Formula: k * sqrt(avgSold / S_sale) * (s2 - s1)
         // We need to scale this to match USDC's 6 decimals
         uint256 avgSold = (s1 + s2) / 2;
-        uint256 sqrtAvg = _sqrt((avgSold * 1e18) / salableTokens); // Result: 9 decimals
+        uint256 sqrtAvg = _sqrt((avgSold * 1e18) / salableTokens); // Result: 9 decimals (sqrt of 1e18-scaled ratio)
 
         // sqrtCost calculation:
-        // - k: 6 decimals (USD with 6 decimals, e.g., 9e6 = 9 USD)
-        // - sqrtAvg: varies based on ratio (sqrt output)
+        // - k: unitless integer (e.g., 3 means 3 USD)
+        // - sqrtAvg: 9 decimals (sqrt of 1e18-scaled ratio)
         // - (s2 - s1): 18 decimals (tokens)
-        // Total: 6 + 9 + 18 = 33 decimals
-        // We want 6 decimals output, so divide by 1e27 (33 - 6 = 27)
-        uint256 sqrtCost = (k * sqrtAvg * (s2 - s1)) / (1e18 * 1e9);
+        // Total: k (unitless) * sqrtAvg (9 decimals) * (s2-s1) (18 decimals) = 27 decimals
+        // We want 6 decimals output, so we need to:
+        // 1. Scale k to USDC precision: k * 1e6
+        // 2. Calculate: (k * 1e6 * sqrtAvg * (s2-s1)) / (1e9 * 1e18) = (k * sqrtAvg * (s2-s1)) / 1e21
+        uint256 sqrtCost = (k * sqrtAvg * (s2 - s1)) / 1e21;
 
         // Now both linearCost and sqrtCost are in 6 decimals (USDC units)
         cost = linearCost + sqrtCost;
@@ -671,8 +745,23 @@ contract IDO is ReentrancyGuard {
         status = Status.Launched;
         launchTime = block.timestamp;
 
-        // Calculate fund allocation
-        uint256 lpFunds = (usdcBalance * betaLP) / FEE_DENOMINATOR;
+        // Get final price from bonding curve (price of last token sold)
+        uint256 finalPrice = getCurrentPrice();
+
+        // betaLP is the ratio of LP tokens taken from project reserved tokens
+        // Example: alphaProject=20%, betaLP=70% means 14% of total supply goes to LP
+        uint256 lpTokenAmount = (projectTokens * betaLP) / FEE_DENOMINATOR;
+
+        // Calculate USDC needed for these tokens at final price
+        // finalPrice is in 6 decimals (USDC decimals)
+        // lpTokenAmount is in 18 decimals (token decimals)
+        // Result: lpFunds in 6 decimals (USDC decimals)
+        uint256 lpFunds = (lpTokenAmount * finalPrice) / 1e18;
+
+        // Ensure we have enough USDC for LP (should always be true if math is correct)
+        require(lpFunds <= usdcBalance, "Insufficient USDC for LP");
+
+        // Remaining USDC goes to project DAO Treasury
         uint256 projectFunds = usdcBalance - lpFunds;
 
         // Transfer project funds to DAO Treasury
@@ -680,26 +769,99 @@ contract IDO is ReentrancyGuard {
             IERC20(usdcToken).safeTransfer(daoTreasury, projectFunds);
         }
 
-        // TODO: MVP - Uniswap LP creation and locking
-        // For MVP, we'll skip actual Uniswap integration
-        // In production:
-        // 1. Create Uniswap V3 pool
-        // 2. Add liquidity with lpFunds USDC and project tokens
-        // 3. Transfer LP tokens to RentalManager for locking
+        // Create Uniswap V2 liquidity pool
+        uint256 lpTokensReceived = _createLiquidity(lpFunds, lpTokenAmount);
 
-        // Unfreeze tokens
+        // Transfer remaining project reserved tokens to project address
+        uint256 remainingProjectTokens = projectTokens - lpTokenAmount;
+        if (remainingProjectTokens > 0) {
+            IERC20(tokenAddress).safeTransfer(projectAddress, remainingProjectTokens);
+        }
+
+        // Transfer unsold tokens to protocol treasury
+        uint256 unsoldTokens = salableTokens - soldTokens;
+        if (unsoldTokens > 0) {
+            IERC20(tokenAddress).safeTransfer(protocolTreasury, unsoldTokens);
+        }
+
+        // Unfreeze tokens (now all holders can transfer)
         DatasetToken(tokenAddress).unfreeze();
-
-        uint256 finalPrice = getCurrentPrice();
 
         emit IDOLaunched(
             finalPrice,
             usdcBalance,
             lpFunds,
             projectFunds,
-            0,
+            lpTokensReceived,
             block.timestamp
         );
+    }
+
+    /**
+     * @notice Creates Uniswap V2 liquidity pool and locks LP tokens
+     * @param usdcAmount Amount of USDC for liquidity
+     * @param tokenAmount Amount of dataset tokens for liquidity
+     * @return liquidity Amount of LP tokens received
+     */
+    function _createLiquidity(
+        uint256 usdcAmount,
+        uint256 tokenAmount
+    ) internal returns (uint256 liquidity) {
+        // Get or create pair
+        address pair = IUniswapV2Factory(uniswapV2Factory).getPair(
+            usdcToken,
+            tokenAddress
+        );
+
+        if (pair == address(0)) {
+            pair = IUniswapV2Factory(uniswapV2Factory).createPair(
+                usdcToken,
+                tokenAddress
+            );
+        }
+
+        liquidityPair = pair;
+
+        // Approve router to spend tokens
+        IERC20(usdcToken).forceApprove(uniswapV2Router, usdcAmount);
+        IERC20(tokenAddress).forceApprove(uniswapV2Router, tokenAmount);
+
+        // Add liquidity with 1% slippage tolerance
+        uint256 minUSDC = (usdcAmount * 99) / 100;
+        uint256 minToken = (tokenAmount * 99) / 100;
+
+        (uint256 amountUSDC, uint256 amountToken, uint256 lpTokens) =
+            IUniswapV2Router02(uniswapV2Router).addLiquidity(
+                usdcToken,
+                tokenAddress,
+                usdcAmount,
+                tokenAmount,
+                minUSDC,
+                minToken,
+                address(this),  // LP tokens sent to this contract first
+                block.timestamp + 300  // 5 minute deadline
+            );
+
+        // Approve RentalManager to take LP tokens
+        IERC20(pair).forceApprove(rentalManager, lpTokens);
+
+        // Lock LP tokens in RentalManager
+        IRentalManager(rentalManager).lockLP(
+            tokenAddress,
+            pair,
+            lpTokens,
+            usdcBalance,  // lpValueUSDC = total raised (used for unlock ratio)
+            projectAddress
+        );
+
+        emit LiquidityAdded(
+            pair,
+            amountUSDC,
+            amountToken,
+            lpTokens
+        );
+
+        return lpTokens;
     }
 
     /**

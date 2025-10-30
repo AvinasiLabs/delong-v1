@@ -49,7 +49,9 @@ contract IDOTest is DeLongTestBase {
             address(usdc),
             protocolTreasury,
             address(daoTreasury),
-            address(rentalManager)
+            address(rentalManager),
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
         );
 
         // Set IDO and temporary address as frozen exempt

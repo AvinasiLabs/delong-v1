@@ -72,7 +72,9 @@ contract DeploySepolia is Script {
         factory.configure(
             address(rentalManager),
             address(daoTreasury),
-            protocolTreasury
+            protocolTreasury,
+            0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008,
+            0x7E0987E5b3a30e3f2828572Bb659A548460a3003
         );
         console.log("Factory configured");
 

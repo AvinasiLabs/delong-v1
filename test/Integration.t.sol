@@ -37,7 +37,9 @@ contract IntegrationTest is DeLongTestBase {
         factory.configure(
             address(rentalManager),
             address(daoTreasury),
-            protocolTreasury
+            protocolTreasury,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
         );
 
         // Configure shared contracts

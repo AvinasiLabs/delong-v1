@@ -7,9 +7,9 @@ dataSources:
     name: Factory
     network: sepolia
     source:
-      address: "0xE284732Ee1872e2693c0d4B2B9e601Bb76576216"
+      address: "0x9Cc5B04A7C6d03F1F64F9da175D42b10FD81fD08"
       abi: Factory
-      startBlock: 9514000
+      startBlock: 9515856
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -29,9 +29,9 @@ dataSources:
     name: RentalManager
     network: sepolia
     source:
-      address: "0xD0cf7e8CcED7515B1CfCF8890C6FFDB52A1692BF"
+      address: "0x76A0AeC4910333dE5221BBf802E75953cb2D5883"
       abi: RentalManager
-      startBlock: 9514000
+      startBlock: 9515856
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -66,9 +66,9 @@ dataSources:
     name: DAOTreasury
     network: sepolia
     source:
-      address: "0xaFfE0142BA95CC12DF7ed330af1e55C67333D391"
+      address: "0x6d306d03e36F14dd0704E59b51e3Df745505517D"
       abi: DAOTreasury
-      startBlock: 9514000
+      startBlock: 9515856
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
@@ -97,9 +97,9 @@ dataSources:
     name: DAOGovernance
     network: sepolia
     source:
-      address: "0xC6a5C25fCcB5037709019EF2cc49EA986bFEb950"
+      address: "0xcF58264036f18787ECf1227099c3Bf12e470ad0b"
       abi: DAOGovernance
-      startBlock: 9514000
+      startBlock: 9515856
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
