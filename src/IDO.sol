@@ -160,6 +160,12 @@ contract IDO is ReentrancyGuard {
     /// @notice Target tokens to sell (100% of salable tokens)
     uint256 public targetTokens;
 
+    /// @notice Funding goal (USDC needed to buy all targetTokens, 6 decimals)
+    uint256 public fundingGoal;
+
+    /// @notice Target raise (minimum USDC needed, 6 decimals)
+    uint256 public targetRaise;
+
     /// @notice IDO start timestamp
     uint256 public startTime;
 
@@ -359,6 +365,14 @@ contract IDO is ReentrancyGuard {
         projectTokens = (TOTAL_SUPPLY * alphaProject_) / FEE_DENOMINATOR;
         salableTokens = TOTAL_SUPPLY - projectTokens;
         targetTokens = salableTokens;
+
+        // Calculate funding goals
+        // fundingGoal: USDC needed to buy all targetTokens (from 0 to targetTokens)
+        fundingGoal = _calculateCost(0, targetTokens);
+
+        // targetRaise: minimum USDC needed (minRaiseRatio of targetTokens)
+        uint256 minRequiredTokens = (targetTokens * minRaiseRatio_) / FEE_DENOMINATOR;
+        targetRaise = _calculateCost(0, minRequiredTokens);
 
         // Set timestamps
         startTime = block.timestamp;
@@ -562,6 +576,39 @@ contract IDO is ReentrancyGuard {
     }
 
     // ========== View Functions ==========
+
+    /**
+     * @notice IDO configuration data
+     */
+    struct IDOConfig {
+        uint256 alphaProject;
+        uint256 betaLP;
+        uint256 k;
+        uint256 initialPrice;
+        uint256 minRaiseRatio;
+        uint256 targetTokens;
+        uint256 totalSupply;
+        uint256 fundingGoal;
+        uint256 targetRaise;
+    }
+
+    /**
+     * @notice Get all IDO configuration parameters
+     * @return config Struct containing all configuration parameters
+     */
+    function getConfig() external view returns (IDOConfig memory config) {
+        return IDOConfig({
+            alphaProject: alphaProject,
+            betaLP: betaLP,
+            k: k,
+            initialPrice: initialPrice,
+            minRaiseRatio: minRaiseRatio,
+            targetTokens: targetTokens,
+            totalSupply: TOTAL_SUPPLY,
+            fundingGoal: fundingGoal,
+            targetRaise: targetRaise
+        });
+    }
 
     /**
      * @notice Get current token price
