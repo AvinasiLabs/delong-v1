@@ -13,8 +13,8 @@ import "../src/Factory.sol";
  * @dev Usage: ./script/deploy-sepolia.sh
  */
 contract DeploySepolia is Script {
-    // MockUSDC deployed on Sepolia (10M initial supply to deployer for testing)
-    address public constant SEPOLIA_USDC = 0x854f718774e06879d085ef4f693bb0F2edEa0f24; // MockUSDC (6 decimals)
+    // MockUSDC deployed on Sepolia (100B pre-minted supply, 50k claimable per address)
+    address public constant SEPOLIA_USDC = 0x2bfD56D08d549544AA492Ca021fc3Eb959386Fc0; // MockUSDC (6 decimals)
     
     // Deployment addresses
     RentalManager public rentalManager;

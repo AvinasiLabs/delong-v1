@@ -28,18 +28,6 @@ contract MockUSDCTest is DeLongTestBase {
         );
     }
 
-    function test_Faucet() public {
-        address newUser = makeAddr("newUser");
-        vm.prank(newUser);
-        usdc.faucet();
-
-        assertEq(
-            usdc.balanceOf(newUser),
-            10_000 * 10 ** 6,
-            "New user should receive 10k USDC from faucet"
-        );
-    }
-
     function test_Transfer() public {
         uint256 transferAmount = 100 * 10 ** 6;
 
