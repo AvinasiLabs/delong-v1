@@ -130,18 +130,6 @@ contract DatasetTokenTest is DeLongTestBase {
         datasetToken.setRentalPool(rentalPoolAddr);
     }
 
-    function test_SetDatasetManager() public {
-        address managerAddr = makeAddr("datasetManager");
-
-        datasetToken.setDatasetManager(managerAddr);
-
-        assertEq(
-            datasetToken.datasetManager(),
-            managerAddr,
-            "DatasetManager should be set"
-        );
-    }
-
     function test_AddFrozenExempt() public {
         address exemptAddr = makeAddr("exemptAddress");
 

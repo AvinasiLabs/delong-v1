@@ -5,74 +5,36 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./DatasetToken.sol";
-
-/**
- * @title IUniswapV2Factory
- * @notice Uniswap V2 Factory interface for creating pairs
- */
-interface IUniswapV2Factory {
-    function createPair(address tokenA, address tokenB) external returns (address pair);
-    function getPair(address tokenA, address tokenB) external view returns (address pair);
-}
-
-/**
- * @title IUniswapV2Router02
- * @notice Uniswap V2 Router interface for adding liquidity
- */
-interface IUniswapV2Router02 {
-    function addLiquidity(
-        address tokenA,
-        address tokenB,
-        uint amountADesired,
-        uint amountBDesired,
-        uint amountAMin,
-        uint amountBMin,
-        address to,
-        uint deadline
-    ) external returns (uint amountA, uint amountB, uint liquidity);
-}
-
-/**
- * @title IRentalManager
- * @notice RentalManager interface
- */
-interface IRentalManager {
-    function lockLP(
-        address datasetToken,
-        address lpToken,
-        uint256 amount,
-        uint256 lpValueUSDC,
-        address projectAddress
-    ) external;
-
-    function updatePrice(address datasetToken, uint256 newPricePerHour) external;
-
-    function setDatasetRentalPool(address datasetToken, address rentalPool) external;
-}
+import "./RentalPool.sol";
+import "./libraries/VirtualAMM.sol";
+import "./interfaces/IUniswap.sol";
 
 /**
  * @title IDO
- * @notice Initial Dataset Offering with Bonding Curve pricing
+ * @notice Initial Dataset Offering with Virtual AMM pricing
  * @dev Implements:
- *      - Dynamic pricing based on square-root bonding curve
- *      - Buy/sell tokens with USDC
- *      - Automatic launch when target is reached
- *      - Refund mechanism if target not met
+ *      - Dynamic pricing based on Virtual AMM (Uniswap V2-style constant product)
+ *      - Initial price fixed at 0.01 USDC per token
+ *      - Buy/sell tokens with USDC using virtual reserves
+ *      - Automatic launch when funding goal (rTarget) is reached
+ *      - Refund mechanism if minimum raise ratio not met
  *      - 14-day fundraising period
  *
  * IMPORTANT - DECIMAL PRECISION:
- * The contract's return value precision depends on the 'k' parameter:
+ * The contract uses different decimal precision for different tokens:
  *
  * Key points:
- * - initialPrice: Stored as 6 decimals (e.g., 1000000 = 1 USDC)
- * - k: MUST be a unitless integer (e.g., 3, 9, or 12), NOT scaled by any decimals!
- * - calculateCost(): Returns 6 decimals (e.g., 1070000000 = 1070 USDC)
- * - calculateRefund(): Returns 6 decimals
+ * - USDC: 6 decimals (e.g., 50_000e6 = 50,000 USDC)
+ * - Dataset Token: 18 decimals (e.g., 312_500e18 = 312,500 tokens)
+ * - Prices: 6 decimals USDC per token (e.g., 0.01e6 = 0.01 USDC)
+ * - calculateCost(): Returns 6 decimals (USDC amount including fees)
+ * - calculateRefund(): Returns 6 decimals (USDC amount after fees)
  * - buyTokens() maxCost parameter: Expects 6 decimals
  * - sellTokens() minRefund parameter: Expects 6 decimals
  *
  * When interacting with this contract from frontend:
- * - Pass k as a raw integer (e.g., BigInt(3) or BigInt(9)), NOT parseUnits(k, 18) or parseUnits(k, 6)
+ * - Use parseUnits(amount, 6) for USDC amounts
+ * - Use parseUnits(amount, 18) for token amounts
  * - Use formatUnits(amount, 6) to display USDC amounts from calculateCost/calculateRefund
  * - Use parseUnits(userInput, 6) for maxCost/minRefund parameters
  */
@@ -81,11 +43,8 @@ contract IDO is ReentrancyGuard {
 
     // ========== Constants ==========
 
-    /// @notice Total token supply (1 million tokens)
-    uint256 public constant TOTAL_SUPPLY = 1_000_000 * 10 ** 18;
-
-    /// @notice Fundraising duration (14 days)
-    uint256 public constant SALE_DURATION = 14 days;
+    /// @notice Fundraising duration (100 days)
+    uint256 public constant SALE_DURATION = 100 days;
 
     /// @notice Buy fee rate (0.3% = 30 / 10000)
     uint256 public constant BUY_FEE_RATE = 30;
@@ -96,6 +55,9 @@ contract IDO is ReentrancyGuard {
     /// @notice Fee denominator (100% = 10000)
     uint256 public constant FEE_DENOMINATOR = 10000;
 
+    /// @notice Alpha denominator for basis points (100% = 10000)
+    uint256 public constant ALPHA_DENOMINATOR = 10000;
+
     // ========== Initialization Guard ==========
 
     /// @notice Prevents reinitialization
@@ -103,24 +65,12 @@ contract IDO is ReentrancyGuard {
 
     // ========== Configuration Parameters ==========
 
-    /// @notice Project reserved token ratio (e.g., 2000 = 20%)
-    uint256 public alphaProject;
+    /// @notice Funding goal in USDC (6 decimals, e.g., 50_000e6 = 50,000 USDC)
+    uint256 public rTarget;
 
-    /// @notice Price growth coefficient (unitless integer, e.g., 3, 9, or 12)
-    /// @dev Represents the USD value added to final price when all tokens are sold
-    ///      Recommended range: 6 to 12
-    ///      Example: k=9 means final price = initial price + 9 USD
-    ///      Frontend should pass raw integer (e.g., BigInt(9)), NOT scaled by 1e18 or 1e6
-    uint256 public k;
-
-    /// @notice LP lock ratio (e.g., 7000 = 70% of raised funds for LP)
-    uint256 public betaLP;
-
-    /// @notice Minimum raise ratio (e.g., 7500 = 75%, must sell at least 75% to succeed)
-    uint256 public minRaiseRatio;
-
-    /// @notice Initial price in USDC (6 decimals)
-    uint256 public initialPrice;
+    /// @notice Project ownership ratio in basis points (e.g., 2000 = 20%)
+    /// @dev Valid range: 1-5000 (0.01%-50%)
+    uint256 public alpha;
 
     /// @notice Project owner address (multisig wallet)
     address public projectAddress;
@@ -128,17 +78,15 @@ contract IDO is ReentrancyGuard {
     /// @notice Dataset token contract
     address public tokenAddress;
 
-    /// @notice Protocol treasury address (receives fees)
-    address public protocolTreasury;
+    /// @notice Protocol fee recipient (NOT the Treasury contract)
+    /// @dev Receives protocol fees from trading (buy/sell), typically 0.3%-0.5%
+    address public feeTo;
 
     /// @notice USDC token contract
     address public usdcToken;
 
-    /// @notice DAO Treasury address (receives project funding)
-    address public daoTreasury;
-
-    /// @notice Rental Manager address (receives LP tokens)
-    address public rentalManager;
+    /// @notice Governance contract address (merges treasury + voting, handles funds & LP tokens)
+    address public governance;
 
     /// @notice Uniswap V2 Router address
     address public uniswapV2Router;
@@ -149,27 +97,29 @@ contract IDO is ReentrancyGuard {
     /// @notice Created liquidity pair address
     address public liquidityPair;
 
+    // ========== VirtualAMM State ==========
+
+    /// @notice Virtual AMM reserves
+    VirtualAMM.Reserves public reserves;
+
+    /// @notice Decimal configuration for USDC and tokens
+    VirtualAMM.DecimalConfig public decimalConfig;
+
     // ========== Derived Values ==========
 
-    /// @notice Salable tokens (1 - alpha) * TOTAL_SUPPLY
+    /// @notice Total token supply (calculated dynamically)
+    uint256 public totalSupply;
+
+    /// @notice Salable tokens (1 - alpha) * totalSupply
     uint256 public salableTokens;
 
-    /// @notice Project reserved tokens (alpha * TOTAL_SUPPLY)
+    /// @notice Project reserved tokens (alpha * totalSupply)
     uint256 public projectTokens;
-
-    /// @notice Target tokens to sell (100% of salable tokens)
-    uint256 public targetTokens;
-
-    /// @notice Funding goal (USDC needed to buy all targetTokens, 6 decimals)
-    uint256 public fundingGoal;
-
-    /// @notice Target raise (minimum USDC needed, 6 decimals)
-    uint256 public targetRaise;
 
     /// @notice IDO start timestamp
     uint256 public startTime;
 
-    /// @notice IDO end timestamp (startTime + 14 days)
+    /// @notice IDO end timestamp (startTime + 100 days)
     uint256 public endTime;
 
     // ========== Dynamic State ==========
@@ -178,6 +128,9 @@ contract IDO is ReentrancyGuard {
     uint256 public soldTokens;
 
     /// @notice Contract USDC balance (excluding fees)
+    /// @dev This represents the actual raised amount. When all salable tokens are sold,
+    ///      this is used for liquidity and treasury distribution instead of rTarget.
+    ///      May differ slightly from rTarget due to rounding in multiple transactions.
     uint256 public usdcBalance;
 
     /// @notice IDO status
@@ -196,6 +149,35 @@ contract IDO is ReentrancyGuard {
 
     /// @notice Mapping of users who claimed refund
     mapping(address => bool) public hasClaimedRefund;
+
+    // ========== Dataset Metadata ==========
+
+    /// @notice Metadata version history
+    /// @dev Each version contains IPFS CID pointing to complete metadata JSON
+    struct MetadataVersion {
+        string metadataURI; // IPFS CID
+        uint256 timestamp; // Update timestamp
+    }
+
+    /// @notice Complete metadata version history
+    MetadataVersion[] public metadataHistory;
+
+    // ========== Rental Management ==========
+
+    /// @notice Rental pool (dividend distributor) for this dataset
+    address public rentalPool;
+
+    /// @notice Hourly rental rate in USDC (6 decimals)
+    uint256 public hourlyRate;
+
+    /// @notice User access expiration timestamp
+    mapping(address => uint256) public accessExpiresAt;
+
+    /// @notice Total rental revenue collected
+    uint256 public totalRentalCollected;
+
+    /// @notice Protocol fee rate (5% = 500 basis points for rental)
+    uint256 public constant PROTOCOL_FEE_RATE = 500;
 
     // ========== Events ==========
 
@@ -265,6 +247,44 @@ contract IDO is ReentrancyGuard {
         uint256 timestamp
     );
 
+    /**
+     * @notice Emitted when dataset metadata is updated
+     */
+    event MetadataUpdated(
+        string metadataURI,
+        uint256 version,
+        uint256 timestamp
+    );
+
+    /**
+     * @notice Emitted when user purchases access
+     */
+    event AccessPurchased(
+        address indexed user,
+        uint256 hoursCount,
+        uint256 cost,
+        uint256 expiresAt
+    );
+
+    /**
+     * @notice Emitted when rental revenue is distributed
+     */
+    event RentalDistributed(
+        uint256 totalAmount,
+        uint256 protocolFee,
+        uint256 dividend
+    );
+
+    /**
+     * @notice Emitted when accumulated revenue increases
+     */
+    event RevenueAccumulated(uint256 additionalRevenue, uint256 totalRevenue);
+
+    /**
+     * @notice Emitted when hourly rate is updated
+     */
+    event HourlyRateUpdated(uint256 newRate);
+
     // ========== Errors ==========
 
     error ZeroAddress();
@@ -280,43 +300,56 @@ contract IDO is ReentrancyGuard {
     error AlreadyClaimed();
     error CannotReachTarget();
     error AlreadyInitialized();
+    error TransactionExpired();
+    error OnlyProjectAddress();
+    error EmptyMetadataURI();
+    error InvalidPrice();
+    error NoUnlockableLP();
+    error Unauthorized();
 
     // ========== Constructor (for implementation contract) ==========
 
     constructor() {}
 
+    // ========== Modifiers ==========
+
+    /// @notice Ensures transaction deadline has not passed
+    /// @param deadline Unix timestamp for transaction expiration
+    modifier ensure(uint256 deadline) {
+        if (deadline < block.timestamp) revert TransactionExpired();
+        _;
+    }
+
     // ========== Initializer ==========
 
     /**
      * @notice Initializes the cloned IDO contract
-     * @param alphaProject_ Project reserved ratio (basis points, e.g., 2000 = 20%)
-     * @param k_ Price growth coefficient (unitless integer, e.g., 3, 9, or 12, NOT scaled by any decimals)
-     * @param betaLP_ LP lock ratio (basis points, e.g., 7000 = 70%)
-     * @param minRaiseRatio_ Minimum raise ratio (basis points, e.g., 7500 = 75%)
-     * @param initialPrice_ Initial token price in USDC (6 decimals)
+     * @param rTarget_ Funding goal in USDC (6 decimals, e.g., 50_000e6 = 50,000 USDC)
+     * @param alpha_ Project ownership ratio (basis points, e.g., 2000 = 20%)
      * @param projectAddress_ Project owner address
      * @param tokenAddress_ Dataset token address
      * @param usdcToken_ USDC token address
-     * @param protocolTreasury_ Protocol treasury address
-     * @param daoTreasury_ DAO treasury address
-     * @param rentalManager_ Rental manager address
+     * @param feeTo_ Protocol fee recipient address (receives trading and rental fees)
+     * @param governance_ Governance contract address (merges treasury + voting, handles funds & LP tokens)
+     * @param rentalPool_ Rental pool address (dividend distributor)
      * @param uniswapV2Router_ Uniswap V2 Router address
      * @param uniswapV2Factory_ Uniswap V2 Factory address
+     * @param metadataURI_ Initial metadata IPFS CID
+     * @param hourlyRate_ Hourly rental rate in USDC
      */
     function initialize(
-        uint256 alphaProject_,
-        uint256 k_,
-        uint256 betaLP_,
-        uint256 minRaiseRatio_,
-        uint256 initialPrice_,
+        uint256 rTarget_,
+        uint256 alpha_,
         address projectAddress_,
         address tokenAddress_,
         address usdcToken_,
-        address protocolTreasury_,
-        address daoTreasury_,
-        address rentalManager_,
+        address feeTo_,
+        address governance_,
+        address rentalPool_,
         address uniswapV2Router_,
-        address uniswapV2Factory_
+        address uniswapV2Factory_,
+        string memory metadataURI_,
+        uint256 hourlyRate_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         _initialized = true;
@@ -326,9 +359,9 @@ contract IDO is ReentrancyGuard {
             projectAddress_ == address(0) ||
             tokenAddress_ == address(0) ||
             usdcToken_ == address(0) ||
-            protocolTreasury_ == address(0) ||
-            daoTreasury_ == address(0) ||
-            rentalManager_ == address(0) ||
+            feeTo_ == address(0) ||
+            governance_ == address(0) ||
+            rentalPool_ == address(0) ||
             uniswapV2Router_ == address(0) ||
             uniswapV2Factory_ == address(0)
         ) {
@@ -336,45 +369,45 @@ contract IDO is ReentrancyGuard {
         }
 
         // Validate parameters
-        if (alphaProject_ >= FEE_DENOMINATOR || betaLP_ >= FEE_DENOMINATOR) {
-            revert InvalidParameters();
-        }
-        if (minRaiseRatio_ < 5000 || minRaiseRatio_ > FEE_DENOMINATOR) {
-            revert InvalidParameters();
-        }
-        if (k_ == 0 || initialPrice_ == 0) {
-            revert InvalidParameters();
-        }
+        if (rTarget_ == 0) revert InvalidParameters();
+        if (alpha_ == 0 || alpha_ > 5000) revert InvalidParameters(); // 0.01%-50%
 
         // Set parameters
-        alphaProject = alphaProject_;
-        k = k_;
-        betaLP = betaLP_;
-        minRaiseRatio = minRaiseRatio_;
-        initialPrice = initialPrice_;
+        rTarget = rTarget_;
+        alpha = alpha_;
         projectAddress = projectAddress_;
         tokenAddress = tokenAddress_;
         usdcToken = usdcToken_;
-        protocolTreasury = protocolTreasury_;
-        daoTreasury = daoTreasury_;
-        rentalManager = rentalManager_;
+        feeTo = feeTo_;
+        governance = governance_;
+        rentalPool = rentalPool_;
+        hourlyRate = hourlyRate_;
         uniswapV2Router = uniswapV2Router_;
         uniswapV2Factory = uniswapV2Factory_;
 
-        // Calculate derived values
-        projectTokens = (TOTAL_SUPPLY * alphaProject_) / FEE_DENOMINATOR;
-        salableTokens = TOTAL_SUPPLY - projectTokens;
-        targetTokens = salableTokens;
+        // Initialize decimal configuration
+        decimalConfig = VirtualAMM.DecimalConfig({
+            usdcDecimals: 6,
+            tokenDecimals: 18,
+            usdcUnit: 1e6,
+            tokenUnit: 1e18
+        });
 
-        // Calculate funding goals using EXACT mathematical formula
-        // Formula: R_total = S_sale × (1 + 2k/3)
-        // This matches the frontend calculation and mathematical documentation
-        // Note: _calculateCost uses approximation, so we use exact formula here for consistency
-        fundingGoal = (salableTokens * (3 + 2 * k)) / 3;  // Divide by 1e18 to get USDC (6 decimals)
-        fundingGoal = (fundingGoal * initialPrice) / 1e18;  // Convert from tokens to USDC
+        // Calculate total token supply using VirtualAMM
+        uint256 sSale;
+        uint256 sLP;
+        (totalSupply, sSale, sLP) = VirtualAMM.calculateTotalSupply(
+            rTarget_,
+            alpha_,
+            ALPHA_DENOMINATOR,
+            decimalConfig
+        );
 
-        // targetRaise: minimum USDC needed (minRaiseRatio of fundingGoal)
-        targetRaise = (fundingGoal * minRaiseRatio_) / FEE_DENOMINATOR;
+        salableTokens = sSale;
+        projectTokens = sLP;
+
+        // Initialize Virtual AMM reserves
+        reserves = VirtualAMM.initialize(salableTokens, decimalConfig);
 
         // Set timestamps
         startTime = block.timestamp;
@@ -382,104 +415,128 @@ contract IDO is ReentrancyGuard {
 
         // Set initial status
         status = Status.Active;
+
+        // Validate and store initial metadata
+        if (bytes(metadataURI_).length == 0) revert EmptyMetadataURI();
+        metadataHistory.push(
+            MetadataVersion({
+                metadataURI: metadataURI_,
+                timestamp: block.timestamp
+            })
+        );
     }
 
     // ========== External Functions ==========
 
     /**
-     * @notice Buy tokens with USDC
-     * @param tokenAmount Amount of tokens to buy (18 decimals)
-     * @param maxCost Maximum USDC willing to pay (18 decimals, including fees) for slippage protection
-     * @return cost Actual USDC cost (18 decimals, including fees)
+     * @notice Swap USDC for exact amount of tokens
+     * @param tokenAmountOut Exact amount of tokens to receive (18 decimals)
+     * @param maxUSDCIn Maximum USDC willing to spend (6 decimals, including fees)
+     * @param deadline Transaction deadline timestamp
+     * @return usdcIn Actual USDC spent (6 decimals, including fees)
      */
-    function buyTokens(
-        uint256 tokenAmount,
-        uint256 maxCost
-    ) external nonReentrant returns (uint256 cost) {
+    function swapUSDCForExactTokens(
+        uint256 tokenAmountOut,
+        uint256 maxUSDCIn,
+        uint256 deadline
+    ) external nonReentrant ensure(deadline) returns (uint256 usdcIn) {
         if (status != Status.Active) revert NotActive();
         if (block.timestamp > endTime) revert Expired();
-        if (tokenAmount == 0) revert InsufficientAmount();
+        if (tokenAmountOut == 0) revert InsufficientAmount();
 
-        // Check if purchase would exceed available tokens
-        if (soldTokens + tokenAmount > salableTokens) {
-            revert InsufficientBalance();
-        }
+        // Cap to available salable tokens (prevent overselling)
+        uint256 availableTokens = salableTokens - soldTokens;
+        uint256 actualTokensOut = tokenAmountOut > availableTokens
+            ? availableTokens
+            : tokenAmountOut;
 
-        // Calculate cost using bonding curve
-        uint256 costWithoutFee = _calculateCost(
-            soldTokens,
-            soldTokens + tokenAmount
+        // Also check virtual AMM reserves
+        if (actualTokensOut > reserves.y) revert InsufficientBalance();
+
+        // Calculate cost using VirtualAMM (for actual tokens)
+        uint256 costWithoutFee = VirtualAMM.getUSDCIn(
+            reserves,
+            actualTokensOut
         );
 
         // Calculate fee
         uint256 fee = (costWithoutFee * BUY_FEE_RATE) / FEE_DENOMINATOR;
 
         // Total cost including fee
-        cost = costWithoutFee + fee;
+        usdcIn = costWithoutFee + fee;
 
         // Check slippage
-        if (cost > maxCost) revert SlippageExceeded();
+        if (usdcIn > maxUSDCIn) revert SlippageExceeded();
 
         // Transfer USDC from user
-        IERC20(usdcToken).safeTransferFrom(msg.sender, address(this), cost);
+        IERC20(usdcToken).safeTransferFrom(msg.sender, address(this), usdcIn);
 
         // Transfer fee to protocol treasury
-        IERC20(usdcToken).safeTransfer(protocolTreasury, fee);
+        IERC20(usdcToken).safeTransfer(feeTo, fee);
 
         // Update state
         usdcBalance += costWithoutFee;
-        soldTokens += tokenAmount;
+        soldTokens += actualTokensOut;
+
+        // Update Virtual AMM reserves
+        VirtualAMM.updateReserves(
+            reserves,
+            int256(costWithoutFee),
+            -int256(actualTokensOut)
+        );
 
         // Mint tokens to user (frozen)
-        DatasetToken(tokenAddress).transfer(msg.sender, tokenAmount);
+        DatasetToken(tokenAddress).transfer(msg.sender, actualTokensOut);
 
         // Get new price
         uint256 newPrice = getCurrentPrice();
 
         emit TokensPurchased(
             msg.sender,
-            tokenAmount,
+            actualTokensOut,
             costWithoutFee,
             fee,
             newPrice,
             block.timestamp
         );
 
-        // Check if target reached and auto-launch
-        if (soldTokens >= targetTokens) {
+        // Check if all salable tokens are sold and auto-launch
+        if (soldTokens == salableTokens) {
             _launch();
         }
     }
 
     /**
-     * @notice Sell tokens back to contract for USDC
-     * @param tokenAmount Amount of tokens to sell (18 decimals)
-     * @param minRefund Minimum USDC expected (18 decimals, after fees) for slippage protection
-     * @return refund Actual USDC refund (18 decimals, after fees)
+     * @notice Swap exact amount of tokens for USDC
+     * @param tokenAmountIn Exact amount of tokens to sell (18 decimals)
+     * @param minUSDCOut Minimum USDC expected (6 decimals, after fees)
+     * @param deadline Transaction deadline timestamp
+     * @return usdcOut Actual USDC received (6 decimals, after fees)
      */
-    function sellTokens(
-        uint256 tokenAmount,
-        uint256 minRefund
-    ) external nonReentrant returns (uint256 refund) {
+    function swapExactTokensForUSDC(
+        uint256 tokenAmountIn,
+        uint256 minUSDCOut,
+        uint256 deadline
+    ) external nonReentrant ensure(deadline) returns (uint256 usdcOut) {
         if (status != Status.Active) revert NotActive();
         if (block.timestamp > endTime) revert Expired();
-        if (tokenAmount == 0) revert InsufficientAmount();
-        if (tokenAmount > soldTokens) revert InsufficientBalance();
+        if (tokenAmountIn == 0) revert InsufficientAmount();
+        if (tokenAmountIn > soldTokens) revert InsufficientBalance();
 
-        // Calculate refund using bonding curve
-        uint256 refundBeforeFee = _calculateCost(
-            soldTokens - tokenAmount,
-            soldTokens
+        // Calculate refund using VirtualAMM
+        uint256 refundBeforeFee = VirtualAMM.getUSDCOut(
+            reserves,
+            tokenAmountIn
         );
 
         // Calculate fee
         uint256 fee = (refundBeforeFee * SELL_FEE_RATE) / FEE_DENOMINATOR;
 
         // Net refund after fee
-        refund = refundBeforeFee - fee;
+        usdcOut = refundBeforeFee - fee;
 
         // Check slippage
-        if (refund < minRefund) revert SlippageExceeded();
+        if (usdcOut < minUSDCOut) revert SlippageExceeded();
 
         // Check contract has enough USDC
         if (usdcBalance < refundBeforeFee) revert InsufficientUSDC();
@@ -488,25 +545,32 @@ contract IDO is ReentrancyGuard {
         IERC20(tokenAddress).safeTransferFrom(
             msg.sender,
             address(this),
-            tokenAmount
+            tokenAmountIn
         );
 
         // Update state
         usdcBalance -= refundBeforeFee;
-        soldTokens -= tokenAmount;
+        soldTokens -= tokenAmountIn;
+
+        // Update Virtual AMM reserves
+        VirtualAMM.updateReserves(
+            reserves,
+            -int256(refundBeforeFee),
+            int256(tokenAmountIn)
+        );
 
         // Transfer fee to protocol treasury
-        IERC20(usdcToken).safeTransfer(protocolTreasury, fee);
+        IERC20(usdcToken).safeTransfer(feeTo, fee);
 
         // Transfer refund to user
-        IERC20(usdcToken).safeTransfer(msg.sender, refund);
+        IERC20(usdcToken).safeTransfer(msg.sender, usdcOut);
 
         // Get new price
         uint256 newPrice = getCurrentPrice();
 
         emit TokensSold(
             msg.sender,
-            tokenAmount,
+            tokenAmountIn,
             refundBeforeFee,
             fee,
             newPrice,
@@ -515,24 +579,201 @@ contract IDO is ReentrancyGuard {
     }
 
     /**
+     * @notice Swap exact amount of USDC for tokens
+     * @param usdcAmountIn Exact amount of USDC to spend (6 decimals)
+     * @param minTokensOut Minimum tokens expected (18 decimals)
+     * @param deadline Transaction deadline timestamp
+     * @return tokensOut Actual tokens received (18 decimals)
+     */
+    function swapExactUSDCForTokens(
+        uint256 usdcAmountIn,
+        uint256 minTokensOut,
+        uint256 deadline
+    ) external nonReentrant ensure(deadline) returns (uint256 tokensOut) {
+        if (status != Status.Active) revert NotActive();
+        if (block.timestamp > endTime) revert Expired();
+        if (usdcAmountIn == 0) revert InsufficientAmount();
+
+        // Calculate fee
+        uint256 fee = (usdcAmountIn * BUY_FEE_RATE) / FEE_DENOMINATOR;
+        uint256 usdcAmountAfterFee = usdcAmountIn - fee;
+
+        // Calculate tokens out using VirtualAMM
+        tokensOut = VirtualAMM.getTokensOut(reserves, usdcAmountAfterFee);
+
+        // Cap to available salable tokens and adjust USDC if needed
+        uint256 availableTokens = salableTokens - soldTokens;
+        uint256 actualUSDCIn = usdcAmountIn;
+        uint256 actualFee = fee;
+        uint256 actualUSDCAfterFee = usdcAmountAfterFee;
+        uint256 refund = 0;
+
+        if (tokensOut > availableTokens) {
+            // Cap tokens to available
+            tokensOut = availableTokens;
+
+            // Recalculate actual USDC needed for capped tokens
+            uint256 actualCostWithoutFee = VirtualAMM.getUSDCIn(
+                reserves,
+                tokensOut
+            );
+            actualFee = (actualCostWithoutFee * BUY_FEE_RATE) / FEE_DENOMINATOR;
+            actualUSDCIn = actualCostWithoutFee + actualFee;
+            actualUSDCAfterFee = actualCostWithoutFee;
+
+            // Calculate refund
+            refund = usdcAmountIn - actualUSDCIn;
+        }
+
+        // Check slippage (using capped tokensOut)
+        if (tokensOut < minTokensOut) revert SlippageExceeded();
+
+        // Also check virtual AMM reserves
+        if (tokensOut > reserves.y) revert InsufficientBalance();
+
+        // Transfer USDC from user
+        IERC20(usdcToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            actualUSDCIn
+        );
+
+        // Transfer fee to protocol treasury
+        IERC20(usdcToken).safeTransfer(feeTo, actualFee);
+
+        // Update state
+        usdcBalance += actualUSDCAfterFee;
+        soldTokens += tokensOut;
+
+        // Update Virtual AMM reserves
+        VirtualAMM.updateReserves(
+            reserves,
+            int256(actualUSDCAfterFee),
+            -int256(tokensOut)
+        );
+
+        // Mint tokens to user (frozen)
+        DatasetToken(tokenAddress).transfer(msg.sender, tokensOut);
+
+        // Refund excess USDC if capped
+        if (refund > 0) {
+            IERC20(usdcToken).safeTransfer(msg.sender, refund);
+        }
+
+        // Get new price
+        uint256 newPrice = getCurrentPrice();
+
+        emit TokensPurchased(
+            msg.sender,
+            tokensOut,
+            actualUSDCAfterFee,
+            actualFee,
+            newPrice,
+            block.timestamp
+        );
+
+        // Check if all salable tokens are sold and auto-launch
+        if (soldTokens == salableTokens) {
+            _launch();
+        }
+    }
+
+    /**
+     * @notice Swap tokens for exact amount of USDC
+     * @param usdcAmountOut Exact amount of USDC to receive (6 decimals)
+     * @param maxTokensIn Maximum tokens willing to sell (18 decimals)
+     * @param deadline Transaction deadline timestamp
+     * @return tokensIn Actual tokens sold (18 decimals)
+     */
+    function swapTokensForExactUSDC(
+        uint256 usdcAmountOut,
+        uint256 maxTokensIn,
+        uint256 deadline
+    ) external nonReentrant ensure(deadline) returns (uint256 tokensIn) {
+        if (status != Status.Active) revert NotActive();
+        if (block.timestamp > endTime) revert Expired();
+        if (usdcAmountOut == 0) revert InsufficientAmount();
+
+        // Calculate USDC before fee from desired output after fee
+        // usdcOut = usdcBeforeFee - fee
+        // usdcOut = usdcBeforeFee * (1 - SELL_FEE_RATE/FEE_DENOMINATOR)
+        // usdcBeforeFee = usdcOut / (1 - SELL_FEE_RATE/FEE_DENOMINATOR)
+        // usdcBeforeFee = usdcOut * FEE_DENOMINATOR / (FEE_DENOMINATOR - SELL_FEE_RATE)
+        uint256 usdcBeforeFee = (usdcAmountOut * FEE_DENOMINATOR) /
+            (FEE_DENOMINATOR - SELL_FEE_RATE);
+
+        // Calculate tokens in using VirtualAMM
+        tokensIn = VirtualAMM.getTokensIn(reserves, usdcBeforeFee);
+
+        // Check slippage
+        if (tokensIn > maxTokensIn) revert SlippageExceeded();
+
+        // Check if user has enough tokens sold
+        if (tokensIn > soldTokens) revert InsufficientBalance();
+
+        // Check contract has enough USDC
+        if (usdcBalance < usdcBeforeFee) revert InsufficientUSDC();
+
+        // Calculate fee
+        uint256 fee = usdcBeforeFee - usdcAmountOut;
+
+        // Transfer tokens from user back to contract
+        IERC20(tokenAddress).safeTransferFrom(
+            msg.sender,
+            address(this),
+            tokensIn
+        );
+
+        // Update state
+        usdcBalance -= usdcBeforeFee;
+        soldTokens -= tokensIn;
+
+        // Update Virtual AMM reserves
+        VirtualAMM.updateReserves(
+            reserves,
+            -int256(usdcBeforeFee),
+            int256(tokensIn)
+        );
+
+        // Transfer fee to protocol treasury
+        IERC20(usdcToken).safeTransfer(feeTo, fee);
+
+        // Transfer USDC to user
+        IERC20(usdcToken).safeTransfer(msg.sender, usdcAmountOut);
+
+        // Get new price
+        uint256 newPrice = getCurrentPrice();
+
+        emit TokensSold(
+            msg.sender,
+            tokensIn,
+            usdcBeforeFee,
+            fee,
+            newPrice,
+            block.timestamp
+        );
+    }
+
+    /**
      * @notice Trigger refund process if IDO failed
-     * @dev Can be called by anyone after expiry if target not met
+     * @dev Can be called by anyone after expiry if not all tokens were sold
      */
     function triggerRefund() external {
         if (status != Status.Active) revert NotActive();
         if (block.timestamp <= endTime) revert NotExpired();
 
-        // Check if minimum raise ratio was not met
-        uint256 minTokensRequired = (targetTokens * minRaiseRatio) /
-            FEE_DENOMINATOR;
-        if (soldTokens >= minTokensRequired) revert CannotReachTarget();
+        // Check if all salable tokens were sold (success case)
+        if (soldTokens == salableTokens) revert CannotReachTarget();
 
         // Update status
         status = Status.Failed;
 
-        // Calculate refund rate
+        // Calculate refund rate (USDC per token in 6 decimals)
         if (soldTokens > 0) {
-            refundRate = usdcBalance / soldTokens;
+            // refundRate has 6 decimals: (usdcBalance * 1e18) / soldTokens / 1e18 = usdcBalance / soldTokens
+            // But we need to scale properly: usdcBalance (6 decimals) / soldTokens (18 decimals)
+            // Result: refundRate in format where (tokenAmount * refundRate) / 1e18 gives USDC (6 decimals)
+            refundRate = (usdcBalance * 1e18) / soldTokens;
         }
 
         emit IDOFailed(soldTokens, usdcBalance, refundRate, block.timestamp);
@@ -584,48 +825,92 @@ contract IDO is ReentrancyGuard {
      * @return price Current price in USDC (6 decimals)
      */
     function getCurrentPrice() public view returns (uint256 price) {
-        return _calculatePrice(soldTokens);
+        return VirtualAMM.getCurrentPrice(reserves, decimalConfig);
     }
 
     /**
-     * @notice Calculate cost to buy tokens
-     * @param tokenAmount Amount of tokens to buy (18 decimals)
-     * @return cost USDC cost in 18 decimals (including 0.3% fee)
-     * @dev Returns 18 decimal precision for accurate frontend display
+     * @notice Predict USDC cost for exact token output
+     * @param tokenAmountOut Amount of tokens to buy (18 decimals)
+     * @return usdcIn USDC cost (6 decimals, including 0.3% fee)
      */
-    function calculateCost(
-        uint256 tokenAmount
-    ) external view returns (uint256 cost) {
-        uint256 costWithoutFee = _calculateCost(
-            soldTokens,
-            soldTokens + tokenAmount
-        );
+    function predictUSDCIn(
+        uint256 tokenAmountOut
+    ) external view returns (uint256 usdcIn) {
+        // Check if purchase would exceed available tokens
+        if (tokenAmountOut > reserves.y) return 0;
+
+        uint256 costWithoutFee = VirtualAMM.getUSDCIn(reserves, tokenAmountOut);
         uint256 fee = (costWithoutFee * BUY_FEE_RATE) / FEE_DENOMINATOR;
-        cost = costWithoutFee + fee;
+        usdcIn = costWithoutFee + fee;
     }
 
     /**
-     * @notice Calculate refund for selling tokens
-     * @param tokenAmount Amount of tokens to sell (18 decimals)
-     * @return refund USDC refund in 18 decimals (after 0.5% fee)
-     * @dev Returns 18 decimal precision for accurate frontend display
+     * @notice Predict USDC output for exact token input
+     * @param tokenAmountIn Amount of tokens to sell (18 decimals)
+     * @return usdcOut USDC output (6 decimals, after 0.5% fee)
      */
-    function calculateRefund(
-        uint256 tokenAmount
-    ) external view returns (uint256 refund) {
-        if (tokenAmount > soldTokens) return 0;
-        uint256 refundBeforeFee = _calculateCost(
-            soldTokens - tokenAmount,
-            soldTokens
+    function predictUSDCOut(
+        uint256 tokenAmountIn
+    ) external view returns (uint256 usdcOut) {
+        if (tokenAmountIn > soldTokens) return 0;
+
+        uint256 refundBeforeFee = VirtualAMM.getUSDCOut(
+            reserves,
+            tokenAmountIn
         );
         uint256 fee = (refundBeforeFee * SELL_FEE_RATE) / FEE_DENOMINATOR;
-        refund = refundBeforeFee - fee;
+        usdcOut = refundBeforeFee - fee;
+    }
+
+    /**
+     * @notice Predict token output for exact USDC input
+     * @param usdcAmountIn Amount of USDC to spend (6 decimals)
+     * @return tokensOut Token output (18 decimals, after 0.3% fee)
+     */
+    function predictTokensOut(
+        uint256 usdcAmountIn
+    ) external view returns (uint256 tokensOut) {
+        if (usdcAmountIn == 0) return 0;
+
+        // Calculate fee
+        uint256 fee = (usdcAmountIn * BUY_FEE_RATE) / FEE_DENOMINATOR;
+        uint256 usdcAmountAfterFee = usdcAmountIn - fee;
+
+        // Calculate tokens out using VirtualAMM
+        tokensOut = VirtualAMM.getTokensOut(reserves, usdcAmountAfterFee);
+
+        // Check if purchase would exceed available tokens
+        if (tokensOut > reserves.y) return 0;
+    }
+
+    /**
+     * @notice Predict token input for exact USDC output
+     * @param usdcAmountOut Amount of USDC to receive (6 decimals)
+     * @return tokensIn Token input (18 decimals, with 0.5% fee included)
+     */
+    function predictTokensIn(
+        uint256 usdcAmountOut
+    ) external view returns (uint256 tokensIn) {
+        if (usdcAmountOut == 0) return 0;
+
+        // Calculate USDC before fee from desired output after fee
+        uint256 usdcBeforeFee = (usdcAmountOut * FEE_DENOMINATOR) /
+            (FEE_DENOMINATOR - SELL_FEE_RATE);
+
+        // Check if contract has enough USDC
+        if (usdcBeforeFee > usdcBalance) return 0;
+
+        // Calculate tokens in using VirtualAMM
+        tokensIn = VirtualAMM.getTokensIn(reserves, usdcBeforeFee);
+
+        // Check if it exceeds sold tokens
+        if (tokensIn > soldTokens) return 0;
     }
 
     /**
      * @notice Get IDO progress information
      * @return sold Tokens sold
-     * @return target Target tokens
+     * @return target Target tokens (salableTokens)
      * @return percentage Progress percentage (basis points)
      * @return timeLeft Time left in seconds (0 if expired)
      */
@@ -640,9 +925,9 @@ contract IDO is ReentrancyGuard {
         )
     {
         sold = soldTokens;
-        target = targetTokens;
-        percentage = targetTokens > 0
-            ? (soldTokens * FEE_DENOMINATOR) / targetTokens
+        target = salableTokens;
+        percentage = salableTokens > 0
+            ? (soldTokens * FEE_DENOMINATOR) / salableTokens
             : 0;
         timeLeft = block.timestamp >= endTime ? 0 : endTime - block.timestamp;
     }
@@ -668,9 +953,9 @@ contract IDO is ReentrancyGuard {
             tokenBalance > 0 &&
             tokenBalance <= soldTokens
         ) {
-            uint256 refundBeforeFee = _calculateCost(
-                soldTokens - tokenBalance,
-                soldTokens
+            uint256 refundBeforeFee = VirtualAMM.getUSDCOut(
+                reserves,
+                tokenBalance
             );
             uint256 fee = (refundBeforeFee * SELL_FEE_RATE) / FEE_DENOMINATOR;
             potentialRefund = refundBeforeFee - fee;
@@ -684,121 +969,64 @@ contract IDO is ReentrancyGuard {
     // ========== Internal Functions ==========
 
     /**
-     * @notice Calculate price at a given sold amount using square-root bonding curve
-     * @dev P(s) = P0 + k * sqrt(s / S_sale)
-     *      where k is a unitless integer (e.g., 3, 9, 12)
-     *      Example: k=9 means price increases by 9 USD when all tokens are sold
-     * @param s Sold tokens amount
-     * @return price Price in USDC (6 decimals)
-     */
-    function _calculatePrice(uint256 s) internal view returns (uint256 price) {
-        if (salableTokens == 0) return initialPrice;
-
-        // Calculate sqrt(s / S_sale) with scaling
-        // We use 1e18 scaling for precision
-        uint256 ratio = (s * 1e18) / salableTokens;
-        uint256 sqrtRatio = _sqrt(ratio);
-
-        // P(s) = P0 + k * sqrt(s / S_sale)
-        // k is unitless (e.g., 3 means 3 USD), sqrtRatio has 9 decimals
-        // We need to scale k to USDC precision (6 decimals) and multiply with sqrtRatio
-        // Result: k * 1e6 * sqrtRatio / 1e9 = k * sqrtRatio / 1e3
-        price = initialPrice + (k * sqrtRatio) / 1e3;
-    }
-
-    /**
-     * @notice Calculate cost between two points on bonding curve (integral)
-     * @dev Simplified integral calculation for square-root curve
-     * @param s1 Start sold amount (18 decimals)
-     * @param s2 End sold amount (18 decimals)
-     * @return cost Cost in 18 decimals (NOT 6 decimals!)
-     *
-     * CRITICAL: This function returns 18 decimals for precision, not USDC's 6 decimals.
-     * The return value must be converted when actually transferring USDC.
-     *
-     * Decimal precision breakdown:
-     * - initialPrice: 6 decimals stored, treated as 18 decimals in calculations
-     * - linearCost: (6 + 18) / 1e18 = 6 decimals, then scaled to 18 decimals
-     * - sqrtCost: (18 + 9 + 18) / (1e18 * 1e9) = 18 decimals
-     * - Final result: 18 decimals
-     */
-    function _calculateCost(
-        uint256 s1,
-        uint256 s2
-    ) internal view returns (uint256 cost) {
-        if (s2 <= s1) return 0;
-
-        // Linear term: P0 * (s2 - s1) / 1e18
-        // Result: 6 decimals (initialPrice) + 18 decimals (s2-s1) - 18 = 6 decimals
-        uint256 linearCost = (initialPrice * (s2 - s1)) / 1e18;
-
-        // Square-root integral term (bonding curve growth)
-        // Formula: k * sqrt(avgSold / S_sale) * (s2 - s1)
-        // We need to scale this to match USDC's 6 decimals
-        uint256 avgSold = (s1 + s2) / 2;
-        uint256 sqrtAvg = _sqrt((avgSold * 1e18) / salableTokens); // Result: 9 decimals (sqrt of 1e18-scaled ratio)
-
-        // sqrtCost calculation:
-        // - k: unitless integer (e.g., 3 means 3 USD)
-        // - sqrtAvg: 9 decimals (sqrt of 1e18-scaled ratio)
-        // - (s2 - s1): 18 decimals (tokens)
-        // Total: k (unitless) * sqrtAvg (9 decimals) * (s2-s1) (18 decimals) = 27 decimals
-        // We want 6 decimals output, so we need to:
-        // 1. Scale k to USDC precision: k * 1e6
-        // 2. Calculate: (k * 1e6 * sqrtAvg * (s2-s1)) / (1e9 * 1e18) = (k * sqrtAvg * (s2-s1)) / 1e21
-        uint256 sqrtCost = (k * sqrtAvg * (s2 - s1)) / 1e21;
-
-        // Now both linearCost and sqrtCost are in 6 decimals (USDC units)
-        cost = linearCost + sqrtCost;
-    }
-
-    /**
      * @notice Execute IDO launch process
-     * @dev Called automatically when target is reached
+     * @dev Called automatically when all salable tokens are sold
+     *
+     * Fund Allocation Strategy (per design document section 2.3):
+     * 1. Get final price from actual AMM reserves (not formula, to avoid rounding errors)
+     * 2. Calculate LP pairing: USDC_LP = S_LP × P_final
+     * 3. Allocate funds:
+     *    - LP: USDC_LP (for Uniswap liquidity)
+     *    - Treasury: usdcBalance - USDC_LP (project funding)
+     * 4. LP ownership: Governance contract (for DAO control)
      */
     function _launch() internal {
         // Update status
         status = Status.Launched;
         launchTime = block.timestamp;
 
-        // Get final price from bonding curve (price of last token sold)
+        // Get final price from actual AMM reserves
+        // Use getCurrentPrice() instead of calculateFinalPrice formula
+        // because actual swaps have rounding errors that cause reserves to differ from theory
         uint256 finalPrice = getCurrentPrice();
 
-        // betaLP is the ratio of LP tokens taken from project reserved tokens
-        // Example: alphaProject=20%, betaLP=70% means 14% of total supply goes to LP
-        uint256 lpTokenAmount = (projectTokens * betaLP) / FEE_DENOMINATOR;
+        // LP token amount is all project reserved tokens (S_LP = alpha * S_total)
+        uint256 lpTokenAmount = projectTokens;
 
-        // Calculate USDC needed for these tokens at final price
-        // finalPrice is in 6 decimals (USDC decimals)
-        // lpTokenAmount is in 18 decimals (token decimals)
-        // Result: lpFunds in 6 decimals (USDC decimals)
+        // Calculate USDC needed for LP pairing at final price
+        // finalPrice: 6 decimals (USDC), lpTokenAmount: 18 decimals (token)
+        // Result: lpFunds in 6 decimals (USDC)
         uint256 lpFunds = (lpTokenAmount * finalPrice) / 1e18;
 
         // Ensure we have enough USDC for LP (should always be true if math is correct)
         require(lpFunds <= usdcBalance, "Insufficient USDC for LP");
 
-        // Remaining USDC goes to project DAO Treasury
+        // Treasury gets remaining USDC: actualRaised - USDC_LP
         uint256 projectFunds = usdcBalance - lpFunds;
 
-        // Transfer project funds to DAO Treasury
+        // Deposit project funds to Governance (which includes treasury functionality)
         if (projectFunds > 0) {
-            IERC20(usdcToken).safeTransfer(daoTreasury, projectFunds);
+            IERC20(usdcToken).forceApprove(governance, projectFunds);
+            (bool success, ) = governance.call(
+                abi.encodeWithSignature("depositFunds(uint256)", projectFunds)
+            );
+            require(success, "Deposit funds failed");
         }
 
         // Create Uniswap V2 liquidity pool
+        // Note: LP tokens are sent to Governance contract for permanent locking
         uint256 lpTokensReceived = _createLiquidity(lpFunds, lpTokenAmount);
 
-        // Transfer remaining project reserved tokens to project address
-        uint256 remainingProjectTokens = projectTokens - lpTokenAmount;
-        if (remainingProjectTokens > 0) {
-            IERC20(tokenAddress).safeTransfer(projectAddress, remainingProjectTokens);
-        }
-
-        // Transfer unsold tokens to protocol treasury
-        uint256 unsoldTokens = salableTokens - soldTokens;
-        if (unsoldTokens > 0) {
-            IERC20(tokenAddress).safeTransfer(protocolTreasury, unsoldTokens);
-        }
+        // Transfer LP tokens to Governance and lock them
+        IERC20(liquidityPair).forceApprove(governance, lpTokensReceived);
+        (bool lockSuccess, ) = governance.call(
+            abi.encodeWithSignature(
+                "lockLP(address,uint256)",
+                liquidityPair,
+                lpTokensReceived
+            )
+        );
+        require(lockSuccess, "Lock LP failed");
 
         // Unfreeze tokens (now all holders can transfer)
         DatasetToken(tokenAddress).unfreeze();
@@ -814,7 +1042,7 @@ contract IDO is ReentrancyGuard {
     }
 
     /**
-     * @notice Creates Uniswap V2 liquidity pool and locks LP tokens
+     * @notice Creates Uniswap V2 liquidity pool and receives LP tokens to this contract
      * @param usdcAmount Amount of USDC for liquidity
      * @param tokenAmount Amount of dataset tokens for liquidity
      * @return liquidity Amount of LP tokens received
@@ -846,97 +1074,147 @@ contract IDO is ReentrancyGuard {
         uint256 minUSDC = (usdcAmount * 99) / 100;
         uint256 minToken = (tokenAmount * 99) / 100;
 
-        (uint256 amountUSDC, uint256 amountToken, uint256 lpTokens) =
-            IUniswapV2Router02(uniswapV2Router).addLiquidity(
+        (uint256 amountUSDC, uint256 amountToken, uint256 lpTokens) = IUniswapV2Router02(
+            uniswapV2Router
+        ).addLiquidity(
                 usdcToken,
                 tokenAddress,
                 usdcAmount,
                 tokenAmount,
                 minUSDC,
                 minToken,
-                address(this),  // LP tokens sent to this contract first
-                block.timestamp + 300  // 5 minute deadline
+                address(this), // LP tokens sent to this IDO contract for locking
+                block.timestamp + 300 // 5 minute deadline
             );
 
-        // Approve RentalManager to take LP tokens
-        IERC20(pair).forceApprove(rentalManager, lpTokens);
-
-        // Lock LP tokens in RentalManager
-        IRentalManager(rentalManager).lockLP(
-            tokenAddress,
-            pair,
-            lpTokens,
-            usdcBalance,  // lpValueUSDC = total raised (used for unlock ratio)
-            projectAddress
-        );
-
-        emit LiquidityAdded(
-            pair,
-            amountUSDC,
-            amountToken,
-            lpTokens
-        );
+        emit LiquidityAdded(pair, amountUSDC, amountToken, lpTokens);
 
         return lpTokens;
     }
 
+    // ========== Metadata Management ==========
+
     /**
-     * @notice Calculate square root using Babylonian method
-     * @param x Value to calculate square root of (scaled by 1e18)
-     * @return y Square root (scaled by 1e9)
+     * @notice Update dataset metadata
+     * @dev Only project owner can update metadata
+     * @param newMetadataURI New IPFS CID pointing to updated metadata JSON
      */
-    function _sqrt(uint256 x) internal pure returns (uint256 y) {
-        if (x == 0) return 0;
+    function updateMetadata(string calldata newMetadataURI) external {
+        if (msg.sender != projectAddress) revert OnlyProjectAddress();
+        if (bytes(newMetadataURI).length == 0) revert EmptyMetadataURI();
 
-        uint256 z = (x + 1) / 2;
-        y = x;
+        metadataHistory.push(
+            MetadataVersion({
+                metadataURI: newMetadataURI,
+                timestamp: block.timestamp
+            })
+        );
 
-        while (z < y) {
-            y = z;
-            z = (x / z + z) / 2;
+        emit MetadataUpdated(
+            newMetadataURI,
+            metadataHistory.length - 1,
+            block.timestamp
+        );
+    }
+
+    /**
+     * @notice Get complete metadata history
+     * @dev Frontend can derive:
+     *      - Current metadata: history[history.length - 1]
+     *      - Version count: history.length
+     *      - Specific version: history[version]
+     * @return history Array of all metadata versions
+     */
+    function getMetadataHistory()
+        external
+        view
+        returns (MetadataVersion[] memory history)
+    {
+        return metadataHistory;
+    }
+
+    // ========== Rental Management ==========
+
+    /**
+     * @notice Purchase data access for specified hours
+     * @dev Automatically distributes rental: 5% protocol fee + 95% dividends
+     *      Updates LP unlock progress based on 100% rental amount
+     *      Access rights are time-based and can be extended by purchasing again
+     * @param hoursCount Number of hours to purchase
+     */
+    function purchaseAccess(uint256 hoursCount) external nonReentrant {
+        if (hoursCount == 0) revert InsufficientAmount();
+        if (hourlyRate == 0) revert InvalidPrice();
+
+        uint256 cost = hourlyRate * hoursCount;
+
+        // Transfer USDC from user
+        IERC20(usdcToken).safeTransferFrom(msg.sender, address(this), cost);
+
+        // Calculate fees and dividends
+        uint256 protocolFee = (cost * PROTOCOL_FEE_RATE) / FEE_DENOMINATOR;
+        uint256 dividend = cost - protocolFee;
+
+        // Transfer protocol fee
+        if (feeTo != address(0)) {
+            IERC20(usdcToken).safeTransfer(feeTo, protocolFee);
         }
-    }
 
-    // ========== FUTURE: Exact Integral Implementation (Currently Unused) ==========
+        // Approve and add dividends to rental pool
+        if (rentalPool != address(0)) {
+            IERC20(usdcToken).forceApprove(rentalPool, dividend);
+            RentalPool(rentalPool).addRevenue(dividend);
+        }
+
+        // Update access rights
+        uint256 currentExpiry = accessExpiresAt[msg.sender];
+        uint256 newExpiry = (currentExpiry > block.timestamp)
+            ? currentExpiry + hoursCount * 1 hours
+            : block.timestamp + hoursCount * 1 hours;
+
+        accessExpiresAt[msg.sender] = newExpiry;
+
+        // Update statistics
+        totalRentalCollected += cost;
+
+        emit AccessPurchased(msg.sender, hoursCount, cost, newExpiry);
+        emit RentalDistributed(cost, protocolFee, dividend);
+    }
 
     /**
-     * @notice Calculate cost using EXACT analytical integral (FUTURE USE)
-     * @dev This is the mathematically precise implementation using the analytical solution
-     *      Formula: ∫[s1,s2] (P0 + k√(s/S)) ds = P0(s2-s1) + (2k/3)(s2^(3/2) - s1^(3/2))/√S
-     *
-     *      Currently commented out - needs thorough testing before production use
-     *      Precision: < 10^-12% error (machine precision for our parameter range)
-     *      Gas cost: ~8k gas (vs ~5k for current approximation)
-     *
-     * @param s1 Start sold amount (18 decimals)
-     * @param s2 End sold amount (18 decimals)
-     * @return cost Cost in 6 decimals (USDC)
+     * @notice Update hourly rental price
+     * @dev Can only be called by project owner or governance
+     * @param newRate New hourly rate (USDC with 6 decimals)
      */
-    /*
-    function _calculateCostExact(
-        uint256 s1,
-        uint256 s2
-    ) internal view returns (uint256 cost) {
-        if (s2 <= s1) return 0;
+    function updateHourlyRate(uint256 newRate) external {
+        if (msg.sender != projectAddress && msg.sender != governance)
+            revert Unauthorized();
+        if (newRate == 0) revert InvalidPrice();
 
-        // Part 1: Linear term P0 × (s2 - s1)
-        uint256 linearCost = (initialPrice * (s2 - s1)) / 1e18;
+        hourlyRate = newRate;
 
-        // Part 2: Exact square-root integral using formula (2k/3) × (s2^(3/2) - s1^(3/2)) / √S_sale
-
-        // Normalize to ratios r = s / S_sale (18 decimals)
-        uint256 r1 = (s1 * 1e18) / salableTokens;
-        uint256 r2 = (s2 * 1e18) / salableTokens;
-
-        // Calculate r^(3/2) = r × √r
-        uint256 r1_pow_1p5 = (r1 * _sqrt(r1)) / 1e9;  // 18 decimals
-        uint256 r2_pow_1p5 = (r2 * _sqrt(r2)) / 1e9;  // 18 decimals
-
-        // Calculate (2k/3) × S_sale × (r2^(3/2) - r1^(3/2))
-        // Result in 6 decimals: (2 × k × S_sale(18) × diff(18)) / (3 × 1e30)
-        uint256 sqrtCost = (2 * k * salableTokens * (r2_pow_1p5 - r1_pow_1p5)) / (3 * 1e30);
-
-        cost = linearCost + sqrtCost;
+        emit HourlyRateUpdated(newRate);
     }
-    */
+
+    /**
+     * @notice Check if user has valid access
+     * @param user User address
+     * @return hasAccess True if user has valid access
+     */
+    function hasValidAccess(address user) external view returns (bool) {
+        return accessExpiresAt[user] > block.timestamp;
+    }
+
+    /**
+     * @notice Get remaining access time for user
+     * @param user User address
+     * @return remainingTime Remaining seconds of access (0 if expired)
+     */
+    function getRemainingAccessTime(
+        address user
+    ) external view returns (uint256 remainingTime) {
+        uint256 expiry = accessExpiresAt[user];
+        if (expiry <= block.timestamp) return 0;
+        return expiry - block.timestamp;
+    }
 }

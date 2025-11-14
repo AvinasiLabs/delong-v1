@@ -2,28 +2,21 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-
-/**
- * @title IRentalPool
- * @notice Interface for RentalPool contract
- */
-interface IRentalPool {
-    function beforeBalanceChange(address user, uint256 oldBalance) external;
-
-    function afterBalanceChange(address user, uint256 newBalance) external;
-}
+import "./interfaces/IRentalPool.sol";
 
 /**
  * @title DatasetToken
- * @notice ERC-20 token for dataset with freezing and dividend integration
+ * @notice ERC-20 token for dataset with freezing, voting, and dividend integration
  * @dev Implements:
  *      - Freezing mechanism during IDO period
  *      - Automatic dividend settlement on transfers via _update hook
- *      - Links to DatasetManager for business logic
+ *      - Voting power checkpoints (ERC20Votes) for governance
  *      - Links to RentalPool for dividend distribution
  */
-contract DatasetToken is ERC20, Ownable {
+contract DatasetToken is ERC20, ERC20Votes, Ownable {
     // ========== Initialization Guard ==========
 
     /// @notice Prevents reinitialization
@@ -39,11 +32,11 @@ contract DatasetToken is ERC20, Ownable {
     /// @notice Address of the RentalPool contract for dividend distribution
     address public rentalPool;
 
-    /// @notice Address of the DatasetManager contract for business logic
-    address public datasetManager;
-
     /// @notice Address of the IDO contract that can freeze/unfreeze tokens
-    address public dleContract;
+    address public idoContract;
+
+    /// @notice Address of the DAO Governance contract that can burn tokens (for delisting)
+    address public governanceContract;
 
     // ========== Freezing Mechanism ==========
 
@@ -67,12 +60,6 @@ contract DatasetToken is ERC20, Ownable {
      */
     event RentalPoolSet(address indexed rentalPool);
 
-    /**
-     * @notice Emitted when DatasetManager address is set
-     * @param datasetManager Address of the DatasetManager contract
-     */
-    event DatasetManagerSet(address indexed datasetManager);
-
     // ========== Errors ==========
 
     error TokenFrozen();
@@ -81,6 +68,7 @@ contract DatasetToken is ERC20, Ownable {
     error AlreadySet();
     error ZeroAddress();
     error AlreadyInitialized();
+    error Unauthorized();
 
     // ========== Constructor (for implementation contract) ==========
 
@@ -88,7 +76,14 @@ contract DatasetToken is ERC20, Ownable {
      * @notice Constructor sets dummy values for implementation contract
      * @dev The implementation contract is never used directly, only cloned
      */
-    constructor() ERC20("DatasetToken Implementation", "DT-IMPL") Ownable(msg.sender) {}
+    constructor()
+        ERC20("DatasetToken Implementation", "DT-IMPL")
+        EIP712("DatasetToken", "1")
+        Ownable(msg.sender)
+    {
+        // Note: EIP712 domain is set at deployment and shared across all clones
+        // This is acceptable as voting is done via Governance contract, not signatures
+    }
 
     // ========== Initializer (called after cloning) ==========
 
@@ -97,14 +92,14 @@ contract DatasetToken is ERC20, Ownable {
      * @param name_ Token name (e.g., "DeLong Dataset AI Training")
      * @param symbol_ Token symbol (e.g., "DLAI")
      * @param initialOwner_ Initial owner address (usually Factory)
-     * @param dleContract_ IDO contract address
+     * @param idoContract_ IDO contract address
      * @param initialSupply_ Initial token supply (minted to this contract, then transferred to IDO)
      */
     function initialize(
         string memory name_,
         string memory symbol_,
         address initialOwner_,
-        address dleContract_,
+        address idoContract_,
         uint256 initialSupply_
     ) external {
         if (_initialized) revert AlreadyInitialized();
@@ -121,13 +116,13 @@ contract DatasetToken is ERC20, Ownable {
         frozenExempt[initialOwner_] = true;
 
         // Set IDO contract
-        if (dleContract_ == address(0)) revert ZeroAddress();
-        dleContract = dleContract_;
-        frozenExempt[dleContract_] = true;
+        if (idoContract_ == address(0)) revert ZeroAddress();
+        idoContract = idoContract_;
+        frozenExempt[idoContract_] = true;
 
         // Mint initial supply directly to IDO contract
         if (initialSupply_ > 0) {
-            _mint(dleContract_, initialSupply_);
+            _mint(idoContract_, initialSupply_);
         }
 
         // Start in frozen state
@@ -157,14 +152,14 @@ contract DatasetToken is ERC20, Ownable {
     /**
      * @notice Sets the IDO contract address (can only be set once)
      * @dev Called by owner (Factory) after deployment to link IDO contract
-     * @param dleContract_ Address of the IDO contract
+     * @param idoContract_ Address of the IDO contract
      */
-    function setDLEContract(address dleContract_) external onlyOwner {
-        if (dleContract != address(0)) revert AlreadySet();
-        if (dleContract_ == address(0)) revert ZeroAddress();
+    function setIDOContract(address idoContract_) external onlyOwner {
+        if (idoContract != address(0)) revert AlreadySet();
+        if (idoContract_ == address(0)) revert ZeroAddress();
 
-        dleContract = dleContract_;
-        frozenExempt[dleContract_] = true;
+        idoContract = idoContract_;
+        frozenExempt[idoContract_] = true;
     }
 
     /**
@@ -173,7 +168,7 @@ contract DatasetToken is ERC20, Ownable {
      *      This operation is irreversible
      */
     function unfreeze() external {
-        if (msg.sender != dleContract) revert OnlyIDOContract();
+        if (msg.sender != idoContract) revert OnlyIDOContract();
         if (!isFrozen) revert AlreadyUnfrozen();
 
         isFrozen = false;
@@ -194,19 +189,6 @@ contract DatasetToken is ERC20, Ownable {
     }
 
     /**
-     * @notice Sets the DatasetManager address (can only be set once)
-     * @dev Called after deployment to link business logic
-     * @param datasetManager_ Address of the DatasetManager contract
-     */
-    function setDatasetManager(address datasetManager_) external onlyOwner {
-        if (datasetManager != address(0)) revert AlreadySet();
-        if (datasetManager_ == address(0)) revert ZeroAddress();
-
-        datasetManager = datasetManager_;
-        emit DatasetManagerSet(datasetManager_);
-    }
-
-    /**
      * @notice Adds an address to the frozen-exempt list
      * @dev Useful for adding Uniswap pool or other contracts that need to operate during freeze
      * @param account Address to mark as exempt
@@ -221,6 +203,31 @@ contract DatasetToken is ERC20, Ownable {
      */
     function removeFrozenExempt(address account) external onlyOwner {
         frozenExempt[account] = false;
+    }
+
+    /**
+     * @notice Sets the Governance contract address (can only be set once)
+     * @dev Called after deployment to enable delisting functionality
+     * @param governanceContract_ Address of the DAO Governance contract
+     */
+    function setGovernanceContract(
+        address governanceContract_
+    ) external onlyOwner {
+        if (governanceContract != address(0)) revert AlreadySet();
+        if (governanceContract_ == address(0)) revert ZeroAddress();
+
+        governanceContract = governanceContract_;
+    }
+
+    /**
+     * @notice Burns tokens from a specified address
+     * @dev Only callable by Governance contract during delisting or refund claims
+     * @param from Address to burn tokens from
+     * @param amount Amount of tokens to burn
+     */
+    function burn(address from, uint256 amount) external {
+        if (msg.sender != governanceContract) revert Unauthorized();
+        _burn(from, amount);
     }
 
     // ========== Internal Functions ==========
@@ -239,7 +246,7 @@ contract DatasetToken is ERC20, Ownable {
         address from,
         address to,
         uint256 amount
-    ) internal override {
+    ) internal override(ERC20, ERC20Votes) {
         // Check freezing status
         if (isFrozen) {
             // Allow transfers if from/to is exempt or if minting (from == address(0))
@@ -267,7 +274,8 @@ contract DatasetToken is ERC20, Ownable {
         }
 
         // Execute the actual balance change
-        super._update(from, to, amount);
+        // ERC20Votes._update internally calls ERC20._update and updates voting checkpoints
+        ERC20Votes._update(from, to, amount);
 
         // If RentalPool is set, update debt baseline after balance changes
         if (rentalPool != address(0)) {

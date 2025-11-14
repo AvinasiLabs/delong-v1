@@ -73,8 +73,14 @@ contract MockUSDC is ERC20, Ownable {
      *      Total supply is limited to prevent unlimited minting.
      */
     function claimTestTokens() external {
-        require(!hasClaimed[msg.sender], "MockUSDC: Already claimed test tokens");
-        require(balanceOf(address(this)) >= claimAmount, "MockUSDC: Insufficient contract balance");
+        require(
+            !hasClaimed[msg.sender],
+            "MockUSDC: Already claimed test tokens"
+        );
+        require(
+            balanceOf(address(this)) >= claimAmount,
+            "MockUSDC: Insufficient contract balance"
+        );
 
         hasClaimed[msg.sender] = true;
         _transfer(address(this), msg.sender, claimAmount);

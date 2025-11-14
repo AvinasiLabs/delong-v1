@@ -4,12 +4,9 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 import "../src/mocks/MockUSDC.sol";
 import "../src/DatasetToken.sol";
-import "../src/DatasetManager.sol";
 import "../src/RentalPool.sol";
-import "../src/RentalManager.sol";
 import "../src/IDO.sol";
-import "../src/DAOTreasury.sol";
-import "../src/DAOGovernance.sol";
+import "../src/Governance.sol";
 import "../src/Factory.sol";
 
 /**
@@ -20,7 +17,7 @@ abstract contract DeLongTestBase is Test {
     // ========== Test Accounts ==========
 
     address public owner;
-    address public protocolTreasury;
+    address public feeTo;
     address public projectAddress;
     address public user1;
     address public user2;
@@ -31,12 +28,9 @@ abstract contract DeLongTestBase is Test {
 
     MockUSDC public usdc;
     DatasetToken public datasetToken;
-    DatasetManager public datasetManager;
     RentalPool public rentalPool;
-    RentalManager public rentalManager;
     IDO public ido;
-    DAOTreasury public daoTreasury;
-    DAOGovernance public daoGovernance;
+    Governance public governance;
     Factory public factory;
 
     // ========== Constants ==========
@@ -50,7 +44,7 @@ abstract contract DeLongTestBase is Test {
     function setUp() public virtual {
         // Create test accounts
         owner = address(this);
-        protocolTreasury = makeAddr("protocolTreasury");
+        feeTo = makeAddr("feeTo");
         projectAddress = makeAddr("projectAddress");
         user1 = makeAddr("user1");
         user2 = makeAddr("user2");
@@ -59,7 +53,7 @@ abstract contract DeLongTestBase is Test {
 
         // Label accounts for better trace output
         vm.label(owner, "Owner");
-        vm.label(protocolTreasury, "ProtocolTreasury");
+        vm.label(feeTo, "ProtocolTreasury");
         vm.label(projectAddress, "ProjectAddress");
         vm.label(user1, "User1");
         vm.label(user2, "User2");
@@ -123,5 +117,29 @@ abstract contract DeLongTestBase is Test {
      */
     function advanceBlocks(uint256 blocks_) internal {
         vm.roll(block.number + blocks_);
+    }
+
+    /**
+     * @notice Creates test metadata URI (IPFS CID)
+     */
+    function createTestMetadataURI(
+        uint256 seed
+    ) internal pure returns (string memory) {
+        // Simulate IPFS CID format: Qm + hash
+        bytes32 hash = keccak256(abi.encodePacked("test-metadata", seed));
+        return string(abi.encodePacked("Qm", _bytes32ToHex(hash)));
+    }
+
+    /**
+     * @notice Helper to convert bytes32 to hex string
+     */
+    function _bytes32ToHex(bytes32 data) private pure returns (string memory) {
+        bytes memory hexChars = "0123456789abcdef";
+        bytes memory result = new bytes(64);
+        for (uint256 i = 0; i < 32; i++) {
+            result[i * 2] = hexChars[uint8(data[i] >> 4)];
+            result[i * 2 + 1] = hexChars[uint8(data[i] & 0x0f)];
+        }
+        return string(result);
     }
 }

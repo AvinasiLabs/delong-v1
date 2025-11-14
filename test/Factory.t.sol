@@ -7,26 +7,26 @@ contract FactoryTest is DeLongTestBase {
     function setUp() public override {
         super.setUp();
 
-        // Deploy core shared contracts
-        rentalManager = new RentalManager(address(usdc), owner);
-        daoTreasury = new DAOTreasury(address(usdc), owner);
+        // Deploy implementation contracts
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
 
-        // Deploy Factory
-        factory = new Factory(address(usdc), owner);
+        // Deploy Factory (governance deployed per-IDO)
+        factory = new Factory(
+            address(usdc),
+            owner,
+            address(tokenImpl),
+            address(poolImpl),
+            address(idoImpl)
+        );
 
         // Configure Factory
         factory.configure(
-            address(rentalManager),
-            address(daoTreasury),
-            protocolTreasury,
-            address(0x1111111111111111111111111111111111111111),
-            address(0x2222222222222222222222222222222222222222)
+            feeTo,
+            address(0x1111111111111111111111111111111111111111), // Mock Uniswap Router
+            address(0x2222222222222222222222222222222222222222)  // Mock Uniswap Factory
         );
-
-        // Configure shared contracts
-        rentalManager.setFactory(address(factory)); // Allow Factory to set prices
-        rentalManager.setProtocolTreasury(protocolTreasury);
-        daoTreasury.setIDOContract(address(factory)); // Factory can act as IDO for testing
 
         vm.label(address(factory), "Factory");
     }
@@ -34,18 +34,8 @@ contract FactoryTest is DeLongTestBase {
     function test_InitialState() public view {
         assertEq(address(factory.usdc()), address(usdc), "USDC should match");
         assertEq(
-            factory.rentalManager(),
-            address(rentalManager),
-            "RentalManager should match"
-        );
-        assertEq(
-            factory.daoTreasury(),
-            address(daoTreasury),
-            "DAOTreasury should match"
-        );
-        assertEq(
-            factory.protocolTreasury(),
-            protocolTreasury,
+            factory.feeTo(),
+            feeTo,
             "ProtocolTreasury should match"
         );
         assertEq(
@@ -58,20 +48,17 @@ contract FactoryTest is DeLongTestBase {
     function test_DeployDataset() public {
         // Prepare deployment parameters
         Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000, // 20%
-            k: 9 * 10 ** 6, // 9 USD
-            betaLP: 7000, // 70%
-            minRaiseRatio: 7500, // 75%
-            initialPrice: 1 * 10 ** 6 // 1 USDC
+            rTarget: 50_000 * 10 ** 6, // 50,000 USDC
+            alpha: 2000 // 20%
         });
 
         // Deploy dataset
         vm.prank(user1);
-        uint256 datasetId = factory.deployDataset(
+        uint256 datasetId = factory.deployIDO(
             projectAddress,
             "Test Dataset",
             "TDS",
-            "ipfs://metadata",
+            createTestMetadataURI(1),
             10 * 10 ** 6, // 10 USDC per hour
             config
         );
@@ -82,37 +69,36 @@ contract FactoryTest is DeLongTestBase {
 
     function test_DeployDatasetCreatesAllContracts() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000,
-            k: 9 * 10 ** 6, // 9 USD
-            betaLP: 7000,
-            minRaiseRatio: 7500,
-            initialPrice: 1 * 10 ** 6
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
         });
 
         vm.prank(user1);
         vm.recordLogs();
-        uint256 datasetId = factory.deployDataset(
+        uint256 datasetId = factory.deployIDO(
             projectAddress,
             "Test Dataset",
             "TDS",
-            "ipfs://metadata",
+            createTestMetadataURI(2),
             10 * 10 ** 6,
             config
         );
 
         // Get deployed addresses from event
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bytes32 eventSig = keccak256("DatasetDeployed(uint256,address,address,address,address,address)");
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address)");
 
         address ido;
         address datasetToken;
-        address datasetManagerAddr;
         address rentalPoolAddr;
+        address governanceAddr;
 
         for (uint i = 0; i < entries.length; i++) {
             if (entries[i].topics[0] == eventSig) {
-                (ido, datasetToken, datasetManagerAddr, rentalPoolAddr) =
-                    abi.decode(entries[i].data, (address, address, address, address));
+                (datasetToken, rentalPoolAddr, governanceAddr) =
+                    abi.decode(entries[i].data, (address, address, address));
+                // IDO address is in topics[3]
+                ido = address(uint160(uint256(entries[i].topics[3])));
                 break;
             }
         }
@@ -120,26 +106,23 @@ contract FactoryTest is DeLongTestBase {
         // Verify all contracts created
         assertTrue(ido != address(0), "IDO should be created");
         assertTrue(datasetToken != address(0), "DatasetToken should be created");
-        assertTrue(datasetManagerAddr != address(0), "DatasetManager should be created");
         assertTrue(rentalPoolAddr != address(0), "RentalPool should be created");
+        assertTrue(governanceAddr != address(0), "Governance should be created");
     }
 
     function test_GetDatasetById() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000,
-            k: 9 * 10 ** 6, // 9 USD
-            betaLP: 7000,
-            minRaiseRatio: 7500,
-            initialPrice: 1 * 10 ** 6
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
         });
 
         vm.prank(user1);
         vm.recordLogs();
-        uint256 datasetId = factory.deployDataset(
+        uint256 datasetId = factory.deployIDO(
             projectAddress,
             "Test",
             "TST",
-            "ipfs://test",
+            createTestMetadataURI(3),
             10 * 10 ** 6,
             config
         );
@@ -152,21 +135,18 @@ contract FactoryTest is DeLongTestBase {
 
     function test_MultipleDatasetDeployment() public {
         Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000,
-            k: 9 * 10 ** 6, // 9 USD
-            betaLP: 7000,
-            minRaiseRatio: 7500,
-            initialPrice: 1 * 10 ** 6
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
         });
 
         // Deploy 3 datasets
         for (uint256 i = 0; i < 3; i++) {
             vm.prank(user1);
-            uint256 id = factory.deployDataset(
+            uint256 id = factory.deployIDO(
                 projectAddress,
                 "Test",
                 "TST",
-                "ipfs://test",
+                createTestMetadataURI(4 + i),
                 10 * 10 ** 6,
                 config
             );
@@ -176,23 +156,75 @@ contract FactoryTest is DeLongTestBase {
         assertEq(factory.datasetCount(), 3, "Should have 3 datasets");
     }
 
-    function test_Configure() public {
-        address newManager = makeAddr("newManager");
+    function test_Configure() public view {
+        // Verify configuration was set correctly in setUp
+        assertEq(factory.feeTo(), feeTo, "FeeTo should match");
+    }
 
-        factory.configure(newManager, address(0), address(0), address(0x1111111111111111111111111111111111111111), address(0x2222222222222222222222222222222222222222));
+    function test_ConfigureOnlyOnce() public {
+        // Deploy a new unconfigured factory
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
+        Factory newFactory = new Factory(
+            address(usdc),
+            owner,
+            address(tokenImpl),
+            address(poolImpl),
+            address(idoImpl)
+        );
 
-        assertEq(factory.rentalManager(), newManager, "Manager should be updated");
+        address newFeeTo = makeAddr("newFeeTo");
+
+        // First configure should succeed
+        newFactory.configure(
+            newFeeTo,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
+
+        // Second configure should revert
+        vm.expectRevert(Factory.AlreadySet.selector);
+        newFactory.configure(
+            newFeeTo,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
+    }
+
+    function test_ConfigureRequiresAllAddresses() public {
+        // Deploy a new unconfigured factory
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
+        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl));
+
+        // Should revert if any address is zero
+        vm.expectRevert(Factory.ZeroAddress.selector);
+        newFactory.configure(
+            address(0), // Missing feeTo
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
     }
 
     // Deployment fee feature has been removed
     // Test removed: test_DeploymentFeeCollection
 
     function test_ConfigureOnlyOwner() public {
-        address newManager = makeAddr("newManager");
+        // Deploy a new unconfigured factory
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
+        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl));
 
         vm.prank(user1);
         vm.expectRevert();
-        factory.configure(newManager, address(0), address(0), address(0x1111111111111111111111111111111111111111), address(0x2222222222222222222222222222222222222222));
+        newFactory.configure(
+            feeTo,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
     }
 
     function test_DatasetCounter() public {
@@ -200,19 +232,16 @@ contract FactoryTest is DeLongTestBase {
 
         // Deploy one dataset
         Factory.IDOConfig memory config = Factory.IDOConfig({
-            alphaProject: 2000,
-            k: 9 * 10 ** 6, // 9 USD
-            betaLP: 7000,
-            minRaiseRatio: 7500,
-            initialPrice: 1 * 10 ** 6
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
         });
 
         vm.prank(user1);
-        factory.deployDataset(
+        factory.deployIDO(
             projectAddress,
             "Test",
             "TST",
-            "ipfs://test",
+            createTestMetadataURI(7),
             10 * 10 ** 6,
             config
         );

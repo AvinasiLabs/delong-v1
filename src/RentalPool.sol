@@ -142,7 +142,7 @@ contract RentalPool is Ownable, ReentrancyGuard {
         // Update total revenue
         totalRevenue += amount;
 
-        // Transfer USDC from caller (RentalManager) to this contract
+        // Transfer USDC from caller (authorized manager) to this contract
         usdc.safeTransferFrom(msg.sender, address(this), amount);
 
         emit RevenueAdded(amount, accRevenuePerToken);

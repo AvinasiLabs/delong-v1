@@ -13,7 +13,6 @@ via_ir = true  # Required to avoid "Stack too deep" errors
 
 # Testing settings
 verbosity = 3
-fuzz_runs = 256
 ffi = false
 
 # File system permissions for deployment scripts
@@ -22,14 +21,29 @@ fs_permissions = [{ access = "read-write", path = "./" }]
 # Gas reports
 gas_reports = ["*"]
 
+# Fuzz testing
+[fuzz]
+runs = 256
+
+# Invariant testing
+[invariant]
+runs = 256
+
 # Formatting
+[fmt]
 line_length = 120
 tab_width = 4
 bracket_spacing = true
 
 [profile.ci]
-fuzz_runs = 10000
-invariant_runs = 1000
+
+# Fuzz testing for CI
+[profile.ci.fuzz]
+runs = 10000
+
+# Invariant testing for CI
+[profile.ci.invariant]
+runs = 1000
 
 [rpc_endpoints]
 sepolia = "${SEPOLIA_RPC_URL}"

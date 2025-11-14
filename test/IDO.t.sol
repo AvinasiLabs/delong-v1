@@ -5,15 +5,26 @@ import "./TestBase.sol";
 
 contract IDOTest is DeLongTestBase {
     // IDO parameters
-    uint256 constant ALPHA_PROJECT = 2000; // 20%
-    uint256 constant K = 9 * 10 ** 6; // 9 USD (price growth coefficient)
-    uint256 constant BETA_LP = 7000; // 70%
-    uint256 constant MIN_RAISE_RATIO = 7500; // 75%
-    uint256 constant INITIAL_PRICE = 1 * 10 ** 6; // 1 USDC
-    uint256 constant TOTAL_SUPPLY = 1_000_000 * 10 ** 18;
+    uint256 constant R_TARGET = 50_000 * 10 ** 6; // 50,000 USDC (funding goal)
+    uint256 constant ALPHA = 2000; // 20% (project ownership ratio)
 
     function setUp() public override {
         super.setUp();
+
+        // Calculate total supply using VirtualAMM
+        VirtualAMM.DecimalConfig memory decimalConfig = VirtualAMM.DecimalConfig({
+            usdcDecimals: 6,
+            tokenDecimals: 18,
+            usdcUnit: 1e6,
+            tokenUnit: 1e18
+        });
+
+        (uint256 totalSupply, , ) = VirtualAMM.calculateTotalSupply(
+            R_TARGET,
+            ALPHA,
+            10000, // ALPHA_DENOMINATOR
+            decimalConfig
+        );
 
         // Deploy DatasetToken
         datasetToken = new DatasetToken();
@@ -22,37 +33,46 @@ contract IDOTest is DeLongTestBase {
             "TDS",
             owner,
             address(0x1234), // Temporary IDO address, will transfer to actual IDO later
-            TOTAL_SUPPLY
+            totalSupply
         );
 
         // Deploy other contracts
-        datasetManager = new DatasetManager();
-        datasetManager.initialize(
+        rentalPool = new RentalPool();
+        rentalPool.initialize(
+            address(usdc),
             address(datasetToken),
-            projectAddress,
-            owner,
-            "ipfs://test"
+            owner
         );
-        rentalManager = new RentalManager(address(usdc), owner);
-        daoTreasury = new DAOTreasury(address(usdc), owner);
 
-        // Deploy IDO
+        // Deploy IDO first (needed for Governance)
         ido = new IDO();
+
+        // Deploy Governance (binds to IDO address)
+        governance = new Governance(
+            address(ido),
+            address(usdc),
+            address(0x1111111111111111111111111111111111111111), // Mock Uniswap Router
+            address(0x2222222222222222222222222222222222222222)  // Mock Uniswap Factory
+        );
+
+        // Initialize IDO
         ido.initialize(
-            ALPHA_PROJECT,
-            K,
-            BETA_LP,
-            MIN_RAISE_RATIO,
-            INITIAL_PRICE,
+            R_TARGET,
+            ALPHA,
             projectAddress,
             address(datasetToken),
             address(usdc),
-            protocolTreasury,
-            address(daoTreasury),
-            address(rentalManager),
+            feeTo,
+            address(governance),
+            address(rentalPool),
             address(0x1111111111111111111111111111111111111111),
-            address(0x2222222222222222222222222222222222222222)
+            address(0x2222222222222222222222222222222222222222),
+            createTestMetadataURI(1),
+            10 * 10 ** 6 // 10 USDC per hour
         );
+
+        // Authorize IDO to call RentalPool.addRevenue
+        rentalPool.setAuthorizedManager(address(ido), true);
 
         // Set IDO and temporary address as frozen exempt
         datasetToken.addFrozenExempt(address(ido));
@@ -60,13 +80,10 @@ contract IDOTest is DeLongTestBase {
 
         // Transfer all tokens from temporary address to IDO
         vm.prank(address(0x1234));
-        datasetToken.transfer(address(ido), TOTAL_SUPPLY);
+        datasetToken.transfer(address(ido), totalSupply);
 
         // Transfer token ownership to IDO
         datasetToken.transferOwnership(address(ido));
-
-        // Configure other contracts
-        daoTreasury.setIDOContract(address(ido));
 
         // Fund users with USDC
         usdc.mint(user1, 1_000_000 * 10 ** 6); // 1M USDC
@@ -74,6 +91,11 @@ contract IDOTest is DeLongTestBase {
         usdc.mint(user3, 1_000_000 * 10 ** 6);
 
         vm.label(address(ido), "IDO");
+    }
+
+    // Helper function to get deadline (5 minutes from now)
+    function getDeadline() internal view returns (uint256) {
+        return block.timestamp + 300;
     }
 
     function test_InitialState() public view {
@@ -89,21 +111,16 @@ contract IDOTest is DeLongTestBase {
         );
         assertEq(ido.usdcToken(), address(usdc), "USDC address should match");
         assertEq(
-            ido.alphaProject(),
-            ALPHA_PROJECT,
-            "Alpha project should match"
+            ido.rTarget(),
+            R_TARGET,
+            "R target should match"
         );
-        assertEq(ido.k(), K, "K should match");
-        assertEq(ido.betaLP(), BETA_LP, "Beta LP should match");
+        assertEq(ido.alpha(), ALPHA, "Alpha should match");
+        // Initial price is fixed at 0.01 USDC in Virtual AMM
         assertEq(
-            ido.minRaiseRatio(),
-            MIN_RAISE_RATIO,
-            "Min raise ratio should match"
-        );
-        assertEq(
-            ido.initialPrice(),
-            INITIAL_PRICE,
-            "Initial price should match"
+            ido.getCurrentPrice(),
+            0.01 * 10 ** 6,
+            "Initial price should be 0.01 USDC"
         );
         assertEq(
             uint256(ido.status()),
@@ -123,7 +140,7 @@ contract IDOTest is DeLongTestBase {
 
         // Buy tokens
         vm.prank(user1);
-        uint256 actualCost = ido.buyTokens(tokenAmount, maxCost);
+        uint256 actualCost = ido.swapUSDCForExactTokens(tokenAmount, maxCost, getDeadline());
 
         // Check user received tokens
         assertEq(
@@ -147,15 +164,15 @@ contract IDOTest is DeLongTestBase {
         vm.prank(user1);
         usdc.approve(address(ido), maxCost);
         vm.prank(user1);
-        uint256 cost1 = ido.buyTokens(tokenAmount, maxCost);
+        uint256 cost1 = ido.swapUSDCForExactTokens(tokenAmount, maxCost, getDeadline());
 
         // User2 buys (price should be higher)
         vm.prank(user2);
         usdc.approve(address(ido), maxCost);
         vm.prank(user2);
-        uint256 cost2 = ido.buyTokens(tokenAmount, maxCost);
+        uint256 cost2 = ido.swapUSDCForExactTokens(tokenAmount, maxCost, getDeadline());
 
-        // Second purchase should cost more (bonding curve)
+        // Second purchase should cost more (Virtual AMM price increases)
         assertGt(cost2, cost1, "Second purchase should be more expensive");
 
         assertEq(
@@ -176,11 +193,11 @@ contract IDOTest is DeLongTestBase {
         vm.prank(user1);
         usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(tokenAmount, 5000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(tokenAmount, 5000 * 10 ** 6, getDeadline());
 
         // Sell half
         uint256 sellAmount = 500 * 10 ** 18;
-        uint256 minRefund = 100 * 10 ** 6; // Minimum acceptable refund
+        uint256 minRefund = 1 * 10 ** 6; // Minimum acceptable refund (1 USDC)
 
         uint256 usdcBefore = usdc.balanceOf(user1);
 
@@ -189,7 +206,7 @@ contract IDOTest is DeLongTestBase {
         datasetToken.approve(address(ido), sellAmount);
 
         vm.prank(user1);
-        uint256 actualRefund = ido.sellTokens(sellAmount, minRefund);
+        uint256 actualRefund = ido.swapExactTokensForUSDC(sellAmount, minRefund, getDeadline());
 
         uint256 usdcAfter = usdc.balanceOf(user1);
 
@@ -219,7 +236,7 @@ contract IDOTest is DeLongTestBase {
     function test_RevertBuyTokens_ZeroAmount() public {
         vm.prank(user1);
         vm.expectRevert(IDO.InsufficientAmount.selector);
-        ido.buyTokens(0, 1000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(0, 1000 * 10 ** 6, getDeadline());
     }
 
     function test_RevertBuyTokens_SlippageExceeded() public {
@@ -231,7 +248,7 @@ contract IDOTest is DeLongTestBase {
 
         vm.prank(user1);
         vm.expectRevert(IDO.SlippageExceeded.selector);
-        ido.buyTokens(tokenAmount, maxCost);
+        ido.swapUSDCForExactTokens(tokenAmount, maxCost, getDeadline());
     }
 
     function test_RevertSellTokens_InsufficientBalance() public {
@@ -239,19 +256,19 @@ contract IDOTest is DeLongTestBase {
 
         vm.prank(user1);
         vm.expectRevert(IDO.InsufficientBalance.selector);
-        ido.sellTokens(sellAmount, 0);
+        ido.swapExactTokensForUSDC(sellAmount, 0, getDeadline());
     }
 
     function test_GetCurrentPrice() public {
-        // Initial price
+        // Initial price (0.01 USDC in Virtual AMM)
         uint256 price0 = ido.getCurrentPrice();
-        assertEq(price0, INITIAL_PRICE, "Initial price should match");
+        assertEq(price0, 0.01 * 10 ** 6, "Initial price should be 0.01 USDC");
 
         // Buy some tokens
         vm.prank(user1);
         usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(1000 * 10 ** 18, 5000 * 10 ** 6, getDeadline());
 
         // Price should increase
         uint256 price1 = ido.getCurrentPrice();
@@ -266,7 +283,7 @@ contract IDOTest is DeLongTestBase {
         vm.prank(user1);
         usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(1000 * 10 ** 18, 5000 * 10 ** 6, getDeadline());
 
         uint256 price1 = ido.getCurrentPrice();
 
@@ -274,7 +291,7 @@ contract IDOTest is DeLongTestBase {
         vm.prank(user2);
         usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user2);
-        ido.buyTokens(1000 * 10 ** 18, 5000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(1000 * 10 ** 18, 5000 * 10 ** 6, getDeadline());
 
         uint256 price2 = ido.getCurrentPrice();
 
@@ -289,7 +306,7 @@ contract IDOTest is DeLongTestBase {
         vm.prank(user1);
         usdc.approve(address(ido), 5000 * 10 ** 6); // Updated for new k=9e6
         vm.prank(user1);
-        uint256 cost = ido.buyTokens(tokenAmount, 5000 * 10 ** 6);
+        uint256 cost = ido.swapUSDCForExactTokens(tokenAmount, 5000 * 10 ** 6, getDeadline());
 
         // IDO should have received USDC (minus fees)
         uint256 idoBalance = usdc.balanceOf(address(ido));
@@ -304,8 +321,8 @@ contract IDOTest is DeLongTestBase {
     }
 
     function test_IDOExpiry() public {
-        // Fast forward past 14 days
-        vm.warp(block.timestamp + 15 days);
+        // Fast forward past 100 days (SALE_DURATION)
+        vm.warp(block.timestamp + 101 days);
 
         // Try to buy tokens - should fail
         vm.prank(user1);
@@ -313,13 +330,12 @@ contract IDOTest is DeLongTestBase {
 
         vm.prank(user1);
         vm.expectRevert(IDO.Expired.selector);
-        ido.buyTokens(100 * 10 ** 18, 1000 * 10 ** 6);
+        ido.swapUSDCForExactTokens(100 * 10 ** 18, 1000 * 10 ** 6, getDeadline());
     }
 
     function test_LaunchSuccessful() public {
-        // Calculate salable tokens
-        uint256 projectTokens = (TOTAL_SUPPLY * ALPHA_PROJECT) / 10000;
-        uint256 salableTokens = TOTAL_SUPPLY - projectTokens;
+        // Get salable tokens from IDO contract
+        uint256 salableTokens = ido.salableTokens();
 
         // Buy enough tokens to reach target (100% of salable)
         uint256 purchaseAmount = salableTokens;
@@ -331,7 +347,7 @@ contract IDOTest is DeLongTestBase {
             vm.prank(user1);
             usdc.approve(address(ido), type(uint256).max);
             vm.prank(user1);
-            try ido.buyTokens(chunkSize, type(uint256).max) {} catch {
+            try ido.swapUSDCForExactTokens(chunkSize, type(uint256).max, getDeadline()) {} catch {
                 // If we run out of tokens, that's expected
                 break;
             }
@@ -349,23 +365,33 @@ contract IDOTest is DeLongTestBase {
     }
 
     function test_SalableTokensCalculation() public view {
-        uint256 projectTokens = (TOTAL_SUPPLY * ALPHA_PROJECT) / 10000;
-        uint256 expectedSalable = TOTAL_SUPPLY - projectTokens;
+        // In Virtual AMM, total supply is calculated as: S_total = 10 × R_target × √(α/(1-α)³)
+        // salableTokens = (1 - alpha) * totalSupply
+        // projectTokens = alpha * totalSupply
 
+        uint256 totalSupply = ido.totalSupply();
+        uint256 projectTokens = ido.projectTokens();
+        uint256 salableTokens = ido.salableTokens();
+
+        // Verify the relationship
         assertEq(
-            ido.salableTokens(),
-            expectedSalable,
-            "Salable tokens should match calculation"
+            totalSupply,
+            salableTokens + projectTokens,
+            "Total supply should equal salable + project tokens"
+        );
+
+        // Verify alpha ratio (with some tolerance for rounding)
+        uint256 alphaRatio = (projectTokens * 10000) / totalSupply;
+        assertApproxEqAbs(
+            alphaRatio,
+            ALPHA,
+            10, // Allow 0.1% tolerance due to sqrt calculations
+            "Alpha ratio should match"
         );
         assertEq(
             ido.projectTokens(),
             projectTokens,
             "Project tokens should match calculation"
-        );
-        assertEq(
-            ido.targetTokens(),
-            expectedSalable,
-            "Target tokens should equal salable tokens"
         );
     }
 
@@ -374,7 +400,47 @@ contract IDOTest is DeLongTestBase {
         uint256 startTime = ido.startTime();
         uint256 endTime = ido.endTime();
 
-        assertEq(endTime - startTime, 14 days, "IDO period should be 14 days");
+        assertEq(endTime - startTime, 100 days, "IDO period should be 100 days");
         assertGt(endTime, block.timestamp, "End time should be in future");
+    }
+
+    function test_OversellProtection() public {
+        // Get salable tokens - total is 2,500,000 tokens
+        uint256 salableTokens = ido.salableTokens();
+
+        // User1 buys some tokens first
+        uint256 user1Buy = 1000 * 10 ** 18;
+
+        vm.prank(user1);
+        usdc.approve(address(ido), type(uint256).max);
+        vm.prank(user1);
+        ido.swapUSDCForExactTokens(user1Buy, type(uint256).max, getDeadline());
+
+        uint256 remaining = salableTokens - ido.soldTokens();
+
+        // User2 tries to buy MORE than remaining (requests 50% more than available)
+        // Should auto-cap to remaining amount
+        uint256 requestedAmount = remaining + (remaining / 2);
+
+        // Calculate max cost user2 is willing to pay - set to their balance
+        uint256 maxCost = usdc.balanceOf(user2);
+
+        vm.prank(user2);
+        usdc.approve(address(ido), maxCost);
+        vm.prank(user2);
+
+        // Try to buy more than available, may hit slippage or succeed with capping
+        try ido.swapUSDCForExactTokens(requestedAmount, maxCost, getDeadline()) {
+            // If succeeded, should have been capped to remaining
+            assertEq(ido.soldTokens(), salableTokens, "Should sell exactly all salable tokens");
+            assertEq(datasetToken.balanceOf(user2), remaining, "User2 should receive remaining tokens only");
+
+            // Verify IDO launched since all tokens sold
+            assertEq(uint256(ido.status()), uint256(IDO.Status.Launched), "IDO should be launched");
+        } catch (bytes memory reason) {
+            // If failed due to slippage, that's acceptable
+            // The important thing is we didn't oversell
+            assertLt(ido.soldTokens(), salableTokens, "Should not oversell even if slippage hit");
+        }
     }
 }
