@@ -37,11 +37,13 @@ contract GovernanceTest is DeLongTestBase {
             "TDT",
             owner,
             address(ido),
+            address(0), // No RentalPool in Governance tests
             1_000_000 * 10 ** 18 // 1M tokens
         );
 
-        // Deploy Governance
-        governance = new Governance(
+        // Deploy and initialize Governance
+        governance = new Governance();
+        governance.initialize(
             address(ido),
             address(usdc),
             uniswapV2Router,

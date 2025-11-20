@@ -29,14 +29,16 @@ contract IntegrationTest is DeLongTestBase {
         DatasetToken tokenImpl = new DatasetToken();
         RentalPool poolImpl = new RentalPool();
         IDO idoImpl = new IDO();
+        Governance governanceImpl = new Governance();
 
-        // Deploy Factory (governance deployed per-IDO)
+        // Deploy Factory (all contracts use clone pattern)
         factory = new Factory(
             address(usdc),
             owner,
             address(tokenImpl),
             address(poolImpl),
-            address(idoImpl)
+            address(idoImpl),
+            address(governanceImpl)
         );
 
         // Configure Factory
@@ -79,13 +81,14 @@ contract IntegrationTest is DeLongTestBase {
         // Get deployed contracts from event
         Vm.Log[] memory entries = vm.getRecordedLogs();
         // IDOCreated event signature
-        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address)");
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
         for (uint i = 0; i < entries.length; i++) {
             if (entries[i].topics[0] == eventSig) {
-                (datasetTokenAddr, rentalPoolAddr) =
-                    abi.decode(entries[i].data, (address, address));
                 // IDO address is in topics[3]
                 idoAddr = address(uint160(uint256(entries[i].topics[3])));
+                // Decode data: token, pool, governance, virtualUsdc, virtualTokens
+                (datasetTokenAddr, rentalPoolAddr, , , ) =
+                    abi.decode(entries[i].data, (address, address, address, uint256, uint256));
                 break;
             }
         }
@@ -213,7 +216,7 @@ contract IntegrationTest is DeLongTestBase {
 
         // Get IDO address from event
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address)");
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
         address idoAddr_;
         for (uint i = 0; i < entries.length; i++) {
             if (entries[i].topics[0] == eventSig) {
@@ -298,7 +301,7 @@ contract IntegrationTest is DeLongTestBase {
         vm.stopPrank();
 
         // Get IDO addresses from events
-        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address)");
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
         address ido1;
         address ido2;
 

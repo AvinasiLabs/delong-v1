@@ -35,9 +35,6 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
     /// @notice Address of the IDO contract that can freeze/unfreeze tokens
     address public idoContract;
 
-    /// @notice Address of the DAO Governance contract that can burn tokens (for delisting)
-    address public governanceContract;
-
     // ========== Freezing Mechanism ==========
 
     /// @notice Whether tokens are currently frozen (only transfers from/to exempt addresses allowed)
@@ -62,13 +59,12 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
 
     // ========== Errors ==========
 
-    error TokenFrozen();
-    error OnlyIDOContract();
-    error AlreadyUnfrozen();
-    error AlreadySet();
-    error ZeroAddress();
-    error AlreadyInitialized();
-    error Unauthorized();
+    error TokenFrozen(); // Token transfers are frozen
+    error OnlyIDOContract(); // Only IDO contract can call this
+    error AlreadyUnfrozen(); // Token already unfrozen
+    error AlreadySet(); // Value already set
+    error ZeroAddress(); // Address cannot be zero
+    error AlreadyInitialized(); // Contract already initialized
 
     // ========== Constructor (for implementation contract) ==========
 
@@ -93,6 +89,7 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
      * @param symbol_ Token symbol (e.g., "DLAI")
      * @param initialOwner_ Initial owner address (usually Factory)
      * @param idoContract_ IDO contract address
+     * @param rentalPool_ RentalPool contract address (for dividend distribution)
      * @param initialSupply_ Initial token supply (minted to this contract, then transferred to IDO)
      */
     function initialize(
@@ -100,6 +97,7 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
         string memory symbol_,
         address initialOwner_,
         address idoContract_,
+        address rentalPool_,
         uint256 initialSupply_
     ) external {
         if (_initialized) revert AlreadyInitialized();
@@ -119,6 +117,12 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
         if (idoContract_ == address(0)) revert ZeroAddress();
         idoContract = idoContract_;
         frozenExempt[idoContract_] = true;
+
+        // Set RentalPool for dividend distribution
+        if (rentalPool_ != address(0)) {
+            rentalPool = rentalPool_;
+            emit RentalPoolSet(rentalPool_);
+        }
 
         // Mint initial supply directly to IDO contract
         if (initialSupply_ > 0) {
@@ -150,19 +154,6 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
     // ========== External Functions ==========
 
     /**
-     * @notice Sets the IDO contract address (can only be set once)
-     * @dev Called by owner (Factory) after deployment to link IDO contract
-     * @param idoContract_ Address of the IDO contract
-     */
-    function setIDOContract(address idoContract_) external onlyOwner {
-        if (idoContract != address(0)) revert AlreadySet();
-        if (idoContract_ == address(0)) revert ZeroAddress();
-
-        idoContract = idoContract_;
-        frozenExempt[idoContract_] = true;
-    }
-
-    /**
      * @notice Unfreezes tokens, allowing free transfers
      * @dev Can only be called once by IDO contract when IDO launches
      *      This operation is irreversible
@@ -173,19 +164,6 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
 
         isFrozen = false;
         emit Unfrozen(block.timestamp);
-    }
-
-    /**
-     * @notice Sets the RentalPool address (can only be set once)
-     * @dev Called after deployment to link dividend distribution system
-     * @param rentalPool_ Address of the RentalPool contract
-     */
-    function setRentalPool(address rentalPool_) external onlyOwner {
-        if (rentalPool != address(0)) revert AlreadySet();
-        if (rentalPool_ == address(0)) revert ZeroAddress();
-
-        rentalPool = rentalPool_;
-        emit RentalPoolSet(rentalPool_);
     }
 
     /**
@@ -203,31 +181,6 @@ contract DatasetToken is ERC20, ERC20Votes, Ownable {
      */
     function removeFrozenExempt(address account) external onlyOwner {
         frozenExempt[account] = false;
-    }
-
-    /**
-     * @notice Sets the Governance contract address (can only be set once)
-     * @dev Called after deployment to enable delisting functionality
-     * @param governanceContract_ Address of the DAO Governance contract
-     */
-    function setGovernanceContract(
-        address governanceContract_
-    ) external onlyOwner {
-        if (governanceContract != address(0)) revert AlreadySet();
-        if (governanceContract_ == address(0)) revert ZeroAddress();
-
-        governanceContract = governanceContract_;
-    }
-
-    /**
-     * @notice Burns tokens from a specified address
-     * @dev Only callable by Governance contract during delisting or refund claims
-     * @param from Address to burn tokens from
-     * @param amount Amount of tokens to burn
-     */
-    function burn(address from, uint256 amount) external {
-        if (msg.sender != governanceContract) revert Unauthorized();
-        _burn(from, amount);
     }
 
     // ========== Internal Functions ==========

@@ -57,6 +57,9 @@ contract DeploySepolia is Script {
 
         idoImplementation = new IDO();
         console.log("  IDO implementation:", address(idoImplementation));
+
+        Governance governanceImplementation = new Governance();
+        console.log("  Governance implementation:", address(governanceImplementation));
         console.log("");
 
         // Step 2: Deploy Factory with implementation addresses
@@ -66,7 +69,8 @@ contract DeploySepolia is Script {
             deployer,
             address(tokenImplementation),
             address(poolImplementation),
-            address(idoImplementation)
+            address(idoImplementation),
+            address(governanceImplementation)
         );
         console.log("Factory deployed at:", address(factory));
         console.log("");

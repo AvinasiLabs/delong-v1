@@ -9,27 +9,30 @@ contract RentalPoolTest is DeLongTestBase {
     function setUp() public override {
         super.setUp();
 
+        // Setup manager (represents IDO contract)
+        manager = makeAddr("manager");
+
         // Deploy DatasetToken
         datasetToken = new DatasetToken();
+
+        // Deploy RentalPool with manager as IDO
+        rentalPool = new RentalPool();
+        rentalPool.initialize(
+            address(usdc),
+            address(datasetToken),
+            owner,
+            manager // Manager acts as IDO contract for testing
+        );
+
+        // Initialize DatasetToken with RentalPool address
         datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
             owner, // owner acts as IDO - tokens minted directly to owner
+            address(rentalPool), // RentalPool for dividend distribution
             10_000_000 * 10 ** 18
         );
-
-        // Deploy RentalPool
-        rentalPool = new RentalPool();
-        rentalPool.initialize(
-            address(usdc),
-            address(datasetToken),
-            owner
-        );
-
-        // Setup manager
-        manager = makeAddr("manager");
-        rentalPool.setAuthorizedManager(manager, true);
 
         // Distribute tokens to users
         datasetToken.transfer(user1, 1000 * 10 ** 18);
@@ -91,7 +94,7 @@ contract RentalPoolTest is DeLongTestBase {
         uint256 revenueAmount = 1000 * 10 ** 6;
 
         vm.prank(user1);
-        vm.expectRevert(RentalPool.Unauthorized.selector);
+        vm.expectRevert(RentalPool.OnlyIDO.selector);
         rentalPool.addRevenue(revenueAmount);
     }
 
@@ -224,9 +227,7 @@ contract RentalPoolTest is DeLongTestBase {
         vm.prank(manager);
         rentalPool.addRevenue(revenueAmount);
 
-        // Setup DatasetToken to integrate with RentalPool
-        datasetToken.setRentalPool(address(rentalPool));
-
+        // RentalPool is already set in setUp()
         // Unfreeze token to allow transfers
         datasetToken.unfreeze();
 
@@ -242,19 +243,8 @@ contract RentalPoolTest is DeLongTestBase {
 
     function test_RevertBeforeBalanceChange_Unauthorized() public {
         vm.prank(user1);
-        vm.expectRevert(RentalPool.Unauthorized.selector);
+        vm.expectRevert(RentalPool.OnlyDatasetToken.selector);
         rentalPool.beforeBalanceChange(user1, 1000);
-    }
-
-    function test_SetAuthorizedManager() public {
-        address newManager = makeAddr("newManager");
-
-        rentalPool.setAuthorizedManager(newManager, true);
-
-        assertTrue(
-            rentalPool.authorizedManagers(newManager),
-            "New manager should be authorized"
-        );
     }
 
     function test_Statistics() public {

@@ -189,7 +189,8 @@ contract IDO is ReentrancyGuard {
         uint256 tokenAmount,
         uint256 usdcCost,
         uint256 fee,
-        uint256 newPrice,
+        uint256 virtualUsdc,
+        uint256 virtualTokens,
         uint256 timestamp
     );
 
@@ -201,7 +202,8 @@ contract IDO is ReentrancyGuard {
         uint256 tokenAmount,
         uint256 usdcRefund,
         uint256 fee,
-        uint256 newPrice,
+        uint256 virtualUsdc,
+        uint256 virtualTokens,
         uint256 timestamp
     );
 
@@ -287,25 +289,28 @@ contract IDO is ReentrancyGuard {
 
     // ========== Errors ==========
 
-    error ZeroAddress();
-    error InvalidParameters();
-    error NotActive();
-    error Expired();
-    error NotExpired();
-    error InsufficientAmount();
-    error SlippageExceeded();
-    error InsufficientBalance();
-    error InsufficientUSDC();
-    error NotFailed();
-    error AlreadyClaimed();
-    error CannotReachTarget();
-    error AlreadyInitialized();
-    error TransactionExpired();
-    error OnlyProjectAddress();
-    error EmptyMetadataURI();
-    error InvalidPrice();
-    error NoUnlockableLP();
-    error Unauthorized();
+    error ZeroAddress(); // Address parameter cannot be zero
+    error InvalidParameters(); // Invalid function parameters
+    error NotActive(); // IDO is not in active state
+    error Expired(); // IDO has expired
+    error NotExpired(); // IDO has not expired yet
+    error InsufficientAmount(); // Token amount too small
+    error SlippageExceeded(); // Price slippage exceeds max tolerance
+    error InsufficientBalance(); // User balance insufficient
+    error InsufficientUSDC(); // USDC balance insufficient
+    error NotFailed(); // IDO has not failed
+    error AlreadyClaimed(); // Refund already claimed
+    error CannotReachTarget(); // Cannot reach funding target
+    error AlreadyInitialized(); // Contract already initialized
+    error TransactionExpired(); // Transaction deadline passed
+    error OnlyProjectAddress(); // Only project owner can call
+    error EmptyMetadataURI(); // Metadata URI cannot be empty
+    error InvalidPrice(); // Rental price invalid
+    error NoUnlockableLP(); // No LP tokens to unlock
+    error Unauthorized(); // Caller not authorized
+    error InsufficientUSDCForLP(); // Not enough USDC for liquidity pool
+    error DepositFundsFailed(); // Failed to deposit funds to governance
+    error LockLPFailed(); // Failed to lock LP tokens
 
     // ========== Constructor (for implementation contract) ==========
 
@@ -488,15 +493,13 @@ contract IDO is ReentrancyGuard {
         // Mint tokens to user (frozen)
         DatasetToken(tokenAddress).transfer(msg.sender, actualTokensOut);
 
-        // Get new price
-        uint256 newPrice = getCurrentPrice();
-
         emit TokensPurchased(
             msg.sender,
             actualTokensOut,
             costWithoutFee,
             fee,
-            newPrice,
+            reserves.x,
+            reserves.y,
             block.timestamp
         );
 
@@ -565,15 +568,13 @@ contract IDO is ReentrancyGuard {
         // Transfer refund to user
         IERC20(usdcToken).safeTransfer(msg.sender, usdcOut);
 
-        // Get new price
-        uint256 newPrice = getCurrentPrice();
-
         emit TokensSold(
             msg.sender,
             tokenAmountIn,
             refundBeforeFee,
             fee,
-            newPrice,
+            reserves.x,
+            reserves.y,
             block.timestamp
         );
     }
@@ -660,15 +661,13 @@ contract IDO is ReentrancyGuard {
             IERC20(usdcToken).safeTransfer(msg.sender, refund);
         }
 
-        // Get new price
-        uint256 newPrice = getCurrentPrice();
-
         emit TokensPurchased(
             msg.sender,
             tokensOut,
             actualUSDCAfterFee,
             actualFee,
-            newPrice,
+            reserves.x,
+            reserves.y,
             block.timestamp
         );
 
@@ -741,15 +740,13 @@ contract IDO is ReentrancyGuard {
         // Transfer USDC to user
         IERC20(usdcToken).safeTransfer(msg.sender, usdcAmountOut);
 
-        // Get new price
-        uint256 newPrice = getCurrentPrice();
-
         emit TokensSold(
             msg.sender,
             tokensIn,
             usdcBeforeFee,
             fee,
-            newPrice,
+            reserves.x,
+            reserves.y,
             block.timestamp
         );
     }
@@ -999,7 +996,7 @@ contract IDO is ReentrancyGuard {
         uint256 lpFunds = (lpTokenAmount * finalPrice) / 1e18;
 
         // Ensure we have enough USDC for LP (should always be true if math is correct)
-        require(lpFunds <= usdcBalance, "Insufficient USDC for LP");
+        if (lpFunds > usdcBalance) revert InsufficientUSDCForLP();
 
         // Treasury gets remaining USDC: actualRaised - USDC_LP
         uint256 projectFunds = usdcBalance - lpFunds;
@@ -1010,7 +1007,7 @@ contract IDO is ReentrancyGuard {
             (bool success, ) = governance.call(
                 abi.encodeWithSignature("depositFunds(uint256)", projectFunds)
             );
-            require(success, "Deposit funds failed");
+            if (!success) revert DepositFundsFailed();
         }
 
         // Create Uniswap V2 liquidity pool
@@ -1026,7 +1023,7 @@ contract IDO is ReentrancyGuard {
                 lpTokensReceived
             )
         );
-        require(lockSuccess, "Lock LP failed");
+        if (!lockSuccess) revert LockLPFailed();
 
         // Unfreeze tokens (now all holders can transfer)
         DatasetToken(tokenAddress).unfreeze();

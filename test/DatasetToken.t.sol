@@ -17,6 +17,7 @@ contract DatasetTokenTest is DeLongTestBase {
             "TDT",
             owner,
             idoContract,
+            address(0), // No RentalPool in basic tests
             1_000_000 * 10 ** 18 // 1M tokens - minted directly to idoContract
         );
 
@@ -108,26 +109,6 @@ contract DatasetTokenTest is DeLongTestBase {
             100 * 10 ** 18,
             "User2 should receive tokens"
         );
-    }
-
-    function test_SetRentalPool() public {
-        address rentalPoolAddr = makeAddr("rentalPool");
-
-        datasetToken.setRentalPool(rentalPoolAddr);
-
-        assertEq(
-            datasetToken.rentalPool(),
-            rentalPoolAddr,
-            "RentalPool should be set"
-        );
-    }
-
-    function test_RevertSetRentalPool_AlreadySet() public {
-        address rentalPoolAddr = makeAddr("rentalPool");
-        datasetToken.setRentalPool(rentalPoolAddr);
-
-        vm.expectRevert(DatasetToken.AlreadySet.selector);
-        datasetToken.setRentalPool(rentalPoolAddr);
     }
 
     function test_AddFrozenExempt() public {

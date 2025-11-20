@@ -53,8 +53,8 @@ contract RentalPool is Ownable, ReentrancyGuard {
     /// @notice Mapping of total claimed per user
     mapping(address => uint256) public userTotalClaimed;
 
-    /// @notice Authorized rental managers that can add revenue
-    mapping(address => bool) public authorizedManagers;
+    /// @notice IDO contract address (only authorized caller for addRevenue)
+    address public idoContract;
 
     // ========== Events ==========
 
@@ -72,22 +72,16 @@ contract RentalPool is Ownable, ReentrancyGuard {
      */
     event DividendsClaimed(address indexed user, uint256 amount);
 
-    /**
-     * @notice Emitted when manager authorization changes
-     * @param manager Manager address
-     * @param authorized Authorization status
-     */
-    event ManagerAuthorizationChanged(address indexed manager, bool authorized);
-
     // ========== Errors ==========
 
-    error ZeroAddress();
-    error ZeroAmount();
-    error Unauthorized();
-    error NoSupply();
-    error NoPendingDividends();
-    error InsufficientBalance();
-    error AlreadyInitialized();
+    error ZeroAddress(); // Address cannot be zero
+    error ZeroAmount(); // Amount cannot be zero
+    error OnlyIDO(); // Only IDO contract can call
+    error OnlyDatasetToken(); // Only DatasetToken contract can call
+    error NoSupply(); // No token supply exists
+    error NoPendingDividends(); // No pending dividends to claim
+    error InsufficientBalance(); // Contract balance insufficient
+    error AlreadyInitialized(); // Contract already initialized
 
     // ========== Constructor (for implementation contract) ==========
 
@@ -100,33 +94,36 @@ contract RentalPool is Ownable, ReentrancyGuard {
      * @param usdc_ USDC token address
      * @param datasetToken_ Dataset token address
      * @param initialOwner_ Initial owner address (usually Factory)
+     * @param idoContract_ IDO contract address (only authorized to call addRevenue)
      */
     function initialize(
         address usdc_,
         address datasetToken_,
-        address initialOwner_
+        address initialOwner_,
+        address idoContract_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         _initialized = true;
 
-        if (usdc_ == address(0) || datasetToken_ == address(0))
+        if (usdc_ == address(0) || datasetToken_ == address(0) || idoContract_ == address(0))
             revert ZeroAddress();
 
         _transferOwnership(initialOwner_);
         usdc = IERC20(usdc_);
         datasetToken = datasetToken_;
+        idoContract = idoContract_;
     }
 
     // ========== External Functions ==========
 
     /**
      * @notice Adds revenue to the pool and updates accumulated rewards
-     * @dev Can only be called by authorized rental managers
+     * @dev Can only be called by IDO contract
      *      Uses Accumulated Rewards algorithm: accRevenuePerToken += (amount * PRECISION) / totalSupply
      * @param amount Revenue amount to add (USDC, 95% of rental payment after protocol fee)
      */
     function addRevenue(uint256 amount) external {
-        if (!authorizedManagers[msg.sender]) revert Unauthorized();
+        if (msg.sender != idoContract) revert OnlyIDO();
         if (amount == 0) revert ZeroAmount();
 
         // Get total supply of dataset tokens
@@ -191,7 +188,7 @@ contract RentalPool is Ownable, ReentrancyGuard {
      * @param oldBalance User's balance before the change
      */
     function beforeBalanceChange(address user, uint256 oldBalance) external {
-        if (msg.sender != datasetToken) revert Unauthorized();
+        if (msg.sender != datasetToken) revert OnlyDatasetToken();
 
         // Calculate accumulated rewards based on old balance
         uint256 accumulated = (oldBalance * accRevenuePerToken) / PRECISION;
@@ -213,7 +210,7 @@ contract RentalPool is Ownable, ReentrancyGuard {
      * @param newBalance User's new balance after the change
      */
     function afterBalanceChange(address user, uint256 newBalance) external {
-        if (msg.sender != datasetToken) revert Unauthorized();
+        if (msg.sender != datasetToken) revert OnlyDatasetToken();
 
         // Update reward debt based on new balance
         rewardDebt[user] = (newBalance * accRevenuePerToken) / PRECISION;
@@ -257,24 +254,5 @@ contract RentalPool is Ownable, ReentrancyGuard {
      */
     function getContractBalance() external view returns (uint256) {
         return usdc.balanceOf(address(this));
-    }
-
-    // ========== Admin Functions ==========
-
-    /**
-     * @notice Authorizes or deauthorizes a rental manager
-     * @dev Only owner can call this
-     * @param manager Manager address
-     * @param authorized Authorization status
-     */
-    function setAuthorizedManager(
-        address manager,
-        bool authorized
-    ) external onlyOwner {
-        if (manager == address(0)) revert ZeroAddress();
-
-        authorizedManagers[manager] = authorized;
-
-        emit ManagerAuthorizationChanged(manager, authorized);
     }
 }

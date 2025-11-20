@@ -36,6 +36,7 @@ contract Factory is Ownable {
     address public tokenImplementation;
     address public poolImplementation;
     address public idoImplementation;
+    address public governanceImplementation;
 
     // ========== Mutable State ==========
 
@@ -54,10 +55,17 @@ contract Factory is Ownable {
         address indexed ido,
         address token,
         address pool,
-        address governance
+        address governance,
+        uint256 virtualUsdc,
+        uint256 virtualTokens
     );
 
-    event ImplementationsSet(address token, address pool, address ido, address governance);
+    event ImplementationsSet(
+        address token,
+        address pool,
+        address ido,
+        address governance
+    );
 
     event Configured(
         address indexed feeTo,
@@ -69,15 +77,16 @@ contract Factory is Ownable {
 
     error ZeroAddress();
     error EmptyString();
-    error InvalidConfig();
-    error AlreadySet();
+    error InvalidRTarget(); // rTarget must be positive
+    error InvalidAlpha(); // alpha must be 1-5000 (0.01%-50%)
+    error AlreadyConfigured(); // Factory already configured
 
     // ========== Constructor ==========
 
     /**
      * @notice Initializes the Factory with USDC address and implementation addresses
-     * @dev Implements EIP-1167 minimal proxy pattern for Token, Pool, and IDO
-     *      Governance is deployed as full instance per IDO (not cloned)
+     * @dev Implements EIP-1167 minimal proxy pattern for Token, Pool, IDO, and Governance
+     *      All contracts are cloned for gas efficiency
      *      Implementation contracts must be deployed separately to avoid initcode size limit
      *
      * @param usdc_ USDC token address (typically 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 on mainnet)
@@ -85,34 +94,38 @@ contract Factory is Ownable {
      * @param tokenImpl_ Pre-deployed DatasetToken implementation address
      * @param poolImpl_ Pre-deployed RentalPool implementation address
      * @param idoImpl_ Pre-deployed IDO implementation address
+     * @param governanceImpl_ Pre-deployed Governance implementation address
      *
      * @dev Gas cost breakdown:
-     *      - Implementation deployments: ~$150 (3 contracts, done once per network)
+     *      - Implementation deployments: ~$200 (4 contracts, done once per network)
      *      - Factory deployment: ~$50 (references implementations)
-     *      - Each IDO deployment: ~$40 (clones Token/Pool/IDO + new Governance)
+     *      - Each IDO deployment: ~$15 (clones Token/Pool/IDO/Governance, saves ~$150 vs old design)
      */
     constructor(
         address usdc_,
         address initialOwner,
         address tokenImpl_,
         address poolImpl_,
-        address idoImpl_
+        address idoImpl_,
+        address governanceImpl_
     ) Ownable(initialOwner) {
-        require(usdc_ != address(0), "0addr");
-        require(tokenImpl_ != address(0), "0addr");
-        require(poolImpl_ != address(0), "0addr");
-        require(idoImpl_ != address(0), "0addr");
+        if (usdc_ == address(0)) revert ZeroAddress();
+        if (tokenImpl_ == address(0)) revert ZeroAddress();
+        if (poolImpl_ == address(0)) revert ZeroAddress();
+        if (idoImpl_ == address(0)) revert ZeroAddress();
+        if (governanceImpl_ == address(0)) revert ZeroAddress();
 
         usdc = usdc_;
         tokenImplementation = tokenImpl_;
         poolImplementation = poolImpl_;
         idoImplementation = idoImpl_;
+        governanceImplementation = governanceImpl_;
 
         emit ImplementationsSet(
             tokenImplementation,
             poolImplementation,
             idoImplementation,
-            address(0) // No governance implementation (deployed per-IDO)
+            governanceImplementation
         );
     }
 
@@ -152,13 +165,12 @@ contract Factory is Ownable {
         uint256 rentalPricePerHour,
         IDOConfig memory config
     ) external returns (uint256 datasetId) {
-        require(projectAddress != address(0), "0addr");
-        require(bytes(name).length > 0 && bytes(symbol).length > 0, "empty");
-        require(bytes(metadataURI).length > 0, "empty");
-        require(
-            config.rTarget > 0 && config.alpha > 0 && config.alpha <= 5000,
-            "config"
-        );
+        if (projectAddress == address(0)) revert ZeroAddress();
+        if (bytes(name).length == 0 || bytes(symbol).length == 0)
+            revert EmptyString();
+        if (bytes(metadataURI).length == 0) revert EmptyString();
+        if (config.rTarget == 0) revert InvalidRTarget();
+        if (config.alpha == 0 || config.alpha > 5000) revert InvalidAlpha();
 
         datasetId = ++datasetCount;
 
@@ -178,33 +190,36 @@ contract Factory is Ownable {
             decimalConfig
         );
 
-        // Clone Token/Pool/IDO implementations
+        // Clone Token/Pool/IDO/Governance implementations
         address token = Clones.clone(tokenImplementation);
         address pool = Clones.clone(poolImplementation);
         address ido = Clones.clone(idoImplementation);
+        address governance = Clones.clone(governanceImplementation);
 
-        // Deploy full Governance instance (binds to IDO address)
-        address governance = address(new Governance(
-            ido,
+        // Initialize Pool first (Token needs pool address in initialize)
+        RentalPool(pool).initialize(
             usdc,
-            uniswapV2Router,
-            uniswapV2Factory
-        ));
+            token,
+            address(this), // Factory is initial owner
+            ido            // IDO contract can call addRevenue
+        );
 
-        // Initialize Token
+        // Initialize Token with RentalPool address
         DatasetToken(token).initialize(
             name,
             symbol,
             address(this), // Factory is initial owner
             ido,
+            pool,          // RentalPool for dividend distribution
             totalSupply
         );
 
-        // Initialize Pool
-        RentalPool(pool).initialize(
+        // Initialize Governance
+        Governance(governance).initialize(
+            ido,
             usdc,
-            token,
-            address(this) // Factory is initial owner
+            uniswapV2Router,
+            uniswapV2Factory
         );
 
         // Initialize IDO with governance and rental pool
@@ -223,14 +238,22 @@ contract Factory is Ownable {
             rentalPricePerHour
         );
 
-        // Authorize IDO contract to call RentalPool.addRevenue
-        RentalPool(pool).setAuthorizedManager(ido, true);
+        // Note: Factory retains ownership of DatasetToken and RentalPool
+        // This is intentional - project address should not control these contracts
 
-        // Transfer ownership
-        DatasetToken(token).transferOwnership(projectAddress);
-        RentalPool(pool).transferOwnership(projectAddress);
+        // Get initial reserves from IDO for event
+        (uint256 virtualUsdc, uint256 virtualTokens, ) = IDO(ido).reserves();
 
-        emit IDOCreated(datasetId, projectAddress, ido, token, pool, governance);
+        emit IDOCreated(
+            datasetId,
+            projectAddress,
+            ido,
+            token,
+            pool,
+            governance,
+            virtualUsdc,
+            virtualTokens
+        );
     }
 
     // ========== Admin Functions ==========
@@ -261,7 +284,7 @@ contract Factory is Ownable {
             uniswapV2Router != address(0) ||
             uniswapV2Factory != address(0)
         ) {
-            revert AlreadySet();
+            revert AlreadyConfigured();
         }
 
         // All addresses are required

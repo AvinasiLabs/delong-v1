@@ -26,29 +26,34 @@ contract IDOTest is DeLongTestBase {
             decimalConfig
         );
 
+        // Deploy IDO first (needed for RentalPool and DatasetToken initialization)
+        ido = new IDO();
+
         // Deploy DatasetToken
         datasetToken = new DatasetToken();
+
+        // Deploy RentalPool
+        rentalPool = new RentalPool();
+        rentalPool.initialize(
+            address(usdc),
+            address(datasetToken),
+            owner,
+            address(ido) // IDO can call addRevenue
+        );
+
+        // Initialize DatasetToken with RentalPool address
         datasetToken.initialize(
             "Test Dataset",
             "TDS",
             owner,
             address(0x1234), // Temporary IDO address, will transfer to actual IDO later
+            address(rentalPool), // RentalPool for dividend distribution
             totalSupply
         );
 
-        // Deploy other contracts
-        rentalPool = new RentalPool();
-        rentalPool.initialize(
-            address(usdc),
-            address(datasetToken),
-            owner
-        );
-
-        // Deploy IDO first (needed for Governance)
-        ido = new IDO();
-
-        // Deploy Governance (binds to IDO address)
-        governance = new Governance(
+        // Deploy and initialize Governance
+        governance = new Governance();
+        governance.initialize(
             address(ido),
             address(usdc),
             address(0x1111111111111111111111111111111111111111), // Mock Uniswap Router
@@ -70,9 +75,6 @@ contract IDOTest is DeLongTestBase {
             createTestMetadataURI(1),
             10 * 10 ** 6 // 10 USDC per hour
         );
-
-        // Authorize IDO to call RentalPool.addRevenue
-        rentalPool.setAuthorizedManager(address(ido), true);
 
         // Set IDO and temporary address as frozen exempt
         datasetToken.addFrozenExempt(address(ido));

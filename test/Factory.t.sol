@@ -11,14 +11,16 @@ contract FactoryTest is DeLongTestBase {
         DatasetToken tokenImpl = new DatasetToken();
         RentalPool poolImpl = new RentalPool();
         IDO idoImpl = new IDO();
+        Governance governanceImpl = new Governance();
 
-        // Deploy Factory (governance deployed per-IDO)
+        // Deploy Factory (all contracts use clone pattern)
         factory = new Factory(
             address(usdc),
             owner,
             address(tokenImpl),
             address(poolImpl),
-            address(idoImpl)
+            address(idoImpl),
+            address(governanceImpl)
         );
 
         // Configure Factory
@@ -86,7 +88,7 @@ contract FactoryTest is DeLongTestBase {
 
         // Get deployed addresses from event
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address)");
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
 
         address ido;
         address datasetToken;
@@ -95,10 +97,11 @@ contract FactoryTest is DeLongTestBase {
 
         for (uint i = 0; i < entries.length; i++) {
             if (entries[i].topics[0] == eventSig) {
-                (datasetToken, rentalPoolAddr, governanceAddr) =
-                    abi.decode(entries[i].data, (address, address, address));
                 // IDO address is in topics[3]
                 ido = address(uint160(uint256(entries[i].topics[3])));
+                // Decode data: token, pool, governance, virtualUsdc, virtualTokens
+                (datasetToken, rentalPoolAddr, governanceAddr, , ) =
+                    abi.decode(entries[i].data, (address, address, address, uint256, uint256));
                 break;
             }
         }
@@ -166,12 +169,14 @@ contract FactoryTest is DeLongTestBase {
         DatasetToken tokenImpl = new DatasetToken();
         RentalPool poolImpl = new RentalPool();
         IDO idoImpl = new IDO();
+        Governance governanceImpl = new Governance();
         Factory newFactory = new Factory(
             address(usdc),
             owner,
             address(tokenImpl),
             address(poolImpl),
-            address(idoImpl)
+            address(idoImpl),
+            address(governanceImpl)
         );
 
         address newFeeTo = makeAddr("newFeeTo");
@@ -184,7 +189,7 @@ contract FactoryTest is DeLongTestBase {
         );
 
         // Second configure should revert
-        vm.expectRevert(Factory.AlreadySet.selector);
+        vm.expectRevert(Factory.AlreadyConfigured.selector);
         newFactory.configure(
             newFeeTo,
             address(0x1111111111111111111111111111111111111111),
@@ -197,7 +202,8 @@ contract FactoryTest is DeLongTestBase {
         DatasetToken tokenImpl = new DatasetToken();
         RentalPool poolImpl = new RentalPool();
         IDO idoImpl = new IDO();
-        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl));
+        Governance governanceImpl = new Governance();
+        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl), address(governanceImpl));
 
         // Should revert if any address is zero
         vm.expectRevert(Factory.ZeroAddress.selector);
@@ -216,7 +222,8 @@ contract FactoryTest is DeLongTestBase {
         DatasetToken tokenImpl = new DatasetToken();
         RentalPool poolImpl = new RentalPool();
         IDO idoImpl = new IDO();
-        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl));
+        Governance governanceImpl = new Governance();
+        Factory newFactory = new Factory(address(usdc), owner, address(tokenImpl), address(poolImpl), address(idoImpl), address(governanceImpl));
 
         vm.prank(user1);
         vm.expectRevert();

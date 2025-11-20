@@ -29,13 +29,18 @@ import "./interfaces/IGovernanceStrategy.sol";
 contract Governance is ReentrancyGuard, ERC165, IGovernanceStrategy {
     using SafeERC20 for IERC20;
 
+    // ========== Initialization Guard ==========
+
+    /// @notice Prevents reinitialization
+    bool private _initialized;
+
     // ========== Core Binding ==========
 
-    /// @notice IDO contract address (immutable, single source of truth)
-    address public immutable ido;
+    /// @notice IDO contract address (single source of truth)
+    address public ido;
 
     /// @notice USDC token
-    IERC20 public immutable usdc;
+    IERC20 public usdc;
 
     // ========== Governance Strategy ==========
 
@@ -109,10 +114,10 @@ contract Governance is ReentrancyGuard, ERC165, IGovernanceStrategy {
     bool public isDelisted;
 
     /// @notice Uniswap V2 Router
-    address public immutable uniswapV2Router;
+    address public uniswapV2Router;
 
     /// @notice Uniswap V2 Factory
-    address public immutable uniswapV2Factory;
+    address public uniswapV2Factory;
 
     /// @notice Total USDC available for refund after delisting
     uint256 public refundPoolUSDC;
@@ -206,40 +211,52 @@ contract Governance is ReentrancyGuard, ERC165, IGovernanceStrategy {
 
     // ========== Errors ==========
 
-    error Unauthorized();
-    error ZeroAddress();
-    error ZeroAmount();
-    error InvalidProposal();
-    error BelowProposalThreshold(); // Proposer holds less than required threshold
-    error AlreadyVoted();
-    error VotingClosed();
-    error InvalidStatus();
-    error InsufficientBalance();
-    error AlreadyDelisted();
-    error NotDelisted();
-    error AlreadyClaimed();
-    error NoTokens();
-    error InvalidStrategy(); // New strategy doesn't implement IGovernanceStrategy
-    error OnlyStrategy(); // Only current governance strategy can call this function
+    error Unauthorized(); // Only IDO contract can call
+    error ZeroAddress(); // Address cannot be zero
+    error ZeroAmount(); // Amount cannot be zero
+    error InvalidProposal(); // Proposal ID does not exist
+    error BelowProposalThreshold(); // Proposer holds less than 1% of tokens
+    error AlreadyVoted(); // User already voted on this proposal
+    error VotingClosed(); // Voting period has ended
+    error InvalidStatus(); // Proposal not in correct status
+    error InsufficientBalance(); // Treasury balance insufficient
+    error AlreadyDelisted(); // Dataset already delisted
+    error NotDelisted(); // Dataset not delisted yet
+    error AlreadyClaimed(); // Refund already claimed
+    error NoTokens(); // User has no tokens to vote
+    error InvalidStrategy(); // Strategy doesn't implement IGovernanceStrategy
+    error OnlyStrategy(); // Only governance strategy can call
+    error AlreadyInitialized(); // Contract already initialized
 
     // ========== Constructor ==========
 
     /**
-     * @notice Initialize governance for a specific IDO
+     * @notice Constructor is empty for Clone pattern
+     * @dev Actual initialization happens in initialize()
+     */
+    constructor() {}
+
+    // ========== Initialization ==========
+
+    /**
+     * @notice Initialize governance for a specific IDO (called after cloning)
      * @param ido_ IDO contract address
      * @param usdc_ USDC token address
      * @param uniswapV2Router_ Uniswap V2 Router address
      * @param uniswapV2Factory_ Uniswap V2 Factory address
      */
-    constructor(
+    function initialize(
         address ido_,
         address usdc_,
         address uniswapV2Router_,
         address uniswapV2Factory_
-    ) {
+    ) external {
+        if (_initialized) revert AlreadyInitialized();
         if (ido_ == address(0) || usdc_ == address(0)) revert ZeroAddress();
         if (uniswapV2Router_ == address(0) || uniswapV2Factory_ == address(0))
             revert ZeroAddress();
+
+        _initialized = true;
 
         ido = ido_;
         usdc = IERC20(usdc_);
@@ -534,14 +551,14 @@ contract Governance is ReentrancyGuard, ERC165, IGovernanceStrategy {
 
         (, uint256 amountUSDC) = IUniswapV2Router02(uniswapV2Router)
             .removeLiquidity(
-            token,
-            address(usdc),
-            lpAmount,
-            0, // Accept any amount
-            0, // Accept any amount
-            address(this),
-            block.timestamp + 300
-        );
+                token,
+                address(usdc),
+                lpAmount,
+                0, // Accept any amount
+                0, // Accept any amount
+                address(this),
+                block.timestamp + 300
+            );
 
         // Note: Dataset tokens returned from LP are sent to address(this)
         // They remain locked here (not burned, but effectively removed from circulation)
