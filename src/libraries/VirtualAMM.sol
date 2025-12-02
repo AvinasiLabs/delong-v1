@@ -71,50 +71,61 @@ library VirtualAMM {
 
     /**
      * @notice Initialize virtual reserves for Virtual AMM
-     * @dev Calculates x₀ and y₀ from salable tokens and initial price
+     * @dev Calculates x₀ and y₀ to satisfy two constraints:
+     *      1. Initial price: P₀ = x₀/y₀ = 0.01
+     *      2. Fundraising goal: When all sSale tokens are sold, USDC raised = rTarget
      *
-     * Formula:
-     * x₀ = (P₀ × S_sale) / (1 - P₀)
-     * y₀ = S_sale / (1 - P₀)
+     * Correct Formula (derived from constraints):
+     * y₀ = (R_target × S_sale) / (R_target - P₀ × S_sale)
+     * x₀ = P₀ × y₀
      * K = x₀ × y₀
      *
-     * @param sSale Amount of tokens for sale (token decimals)
+     * @param sSale Amount of tokens for sale (token decimals, e.g., 50000e18)
+     * @param rTarget Fundraising goal in USDC (USDC decimals, e.g., 1000e6)
      * @param config Decimal configuration
      * @return reserves Initialized virtual reserves
      */
     function initialize(
         uint256 sSale,
+        uint256 rTarget,
         DecimalConfig memory config
     ) internal pure returns (Reserves memory reserves) {
         if (sSale == 0) revert InvalidSaleAmount();
+        if (rTarget == 0) revert InvalidRTarget();
         if (config.usdcUnit == 0 || config.tokenUnit == 0) {
             revert InvalidDecimals();
         }
 
+        // P₀ × S_sale (convert to USDC decimals)
         // P₀ = 0.01 = 1/100
-        // (1 - P₀) = 0.99 = 99/100
-        uint256 oneMinusP0Numerator = P0_DENOMINATOR - P0_NUMERATOR; // 99
+        // S_sale is in token decimals (18), result should be in USDC decimals (6)
+        // p0TimesSale = (S_sale / tokenUnit) × P₀ × usdcUnit
+        //             = (S_sale × P0_NUMERATOR × usdcUnit) / (tokenUnit × P0_DENOMINATOR)
+        uint256 p0TimesSale = (sSale * P0_NUMERATOR * config.usdcUnit) /
+            (config.tokenUnit * P0_DENOMINATOR);
 
-        // x₀ = (P₀ × S_sale) / (1 - P₀)
-        // = (0.01 × S_sale) / 0.99
-        // = (S_sale / 100) / 0.99
-        // = S_sale × 1 / (100 × 0.99)
-        // = S_sale / 99
-        //
-        // Converting units:
-        // S_sale is in token decimals (e.g., 250,000e18)
-        // x₀ should be in USDC decimals (e.g., 2,525.25e6)
-        //
-        // x₀ = (S_sale / tokenUnit) × P₀ / (1 - P₀) × usdcUnit
-        // = (S_sale × P0_NUMERATOR × usdcUnit) / (tokenUnit × P0_DENOMINATOR × oneMinusP0Numerator)
-        reserves.x =
-            (sSale * P0_NUMERATOR * config.usdcUnit) /
-            (config.tokenUnit * oneMinusP0Numerator);
+        // Validate: R_target must be greater than P₀ × S_sale
+        // Otherwise denominator would be zero or negative
+        if (rTarget <= p0TimesSale) revert InvalidRTarget();
 
-        // y₀ = S_sale / (1 - P₀)
-        // = S_sale / 0.99
-        // = S_sale × 100 / 99
-        reserves.y = (sSale * P0_DENOMINATOR) / oneMinusP0Numerator;
+        // denominator = R_target - P₀ × S_sale (in USDC decimals)
+        uint256 denominator = rTarget - p0TimesSale;
+
+        // y₀ = (R_target × S_sale) / (R_target - P₀ × S_sale)
+        // R_target is in USDC decimals (6), S_sale is in token decimals (18)
+        // y₀ should be in token decimals (18)
+        // To maintain precision: y₀ = (R_target × S_sale) / denominator
+        // But we need unit conversion: multiply by tokenUnit/usdcUnit to balance
+        // Actually: y₀ = (rTarget × sSale) / denominator works directly
+        // because rTarget and denominator are both in USDC decimals, they cancel out
+        reserves.y = (rTarget * sSale) / denominator;
+
+        // x₀ = P₀ × y₀ (convert to USDC decimals)
+        // y₀ is in token decimals (18), x₀ should be in USDC decimals (6)
+        // x₀ = (y₀ / tokenUnit) × P₀ × usdcUnit
+        //    = (y₀ × P0_NUMERATOR × usdcUnit) / (tokenUnit × P0_DENOMINATOR)
+        reserves.x = (reserves.y * P0_NUMERATOR * config.usdcUnit) /
+            (config.tokenUnit * P0_DENOMINATOR);
 
         // K = x₀ × y₀
         reserves.K = reserves.x * reserves.y;

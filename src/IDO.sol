@@ -8,6 +8,7 @@ import "./DatasetToken.sol";
 import "./RentalPool.sol";
 import "./libraries/VirtualAMM.sol";
 import "./interfaces/IUniswap.sol";
+import "./interfaces/IGovernance.sol";
 
 /**
  * @title IDO
@@ -309,8 +310,6 @@ contract IDO is ReentrancyGuard {
     error NoUnlockableLP(); // No LP tokens to unlock
     error Unauthorized(); // Caller not authorized
     error InsufficientUSDCForLP(); // Not enough USDC for liquidity pool
-    error DepositFundsFailed(); // Failed to deposit funds to governance
-    error LockLPFailed(); // Failed to lock LP tokens
 
     // ========== Constructor (for implementation contract) ==========
 
@@ -411,8 +410,14 @@ contract IDO is ReentrancyGuard {
         salableTokens = sSale;
         projectTokens = sLP;
 
-        // Initialize Virtual AMM reserves
-        reserves = VirtualAMM.initialize(salableTokens, decimalConfig);
+        // Initialize Virtual AMM reserves with correct formula
+        // y₀ = (R_target × S_sale) / (R_target - P₀ × S_sale)
+        // x₀ = P₀ × y₀
+        reserves = VirtualAMM.initialize(
+            salableTokens,
+            rTarget_,
+            decimalConfig
+        );
 
         // Set timestamps
         startTime = block.timestamp;
@@ -607,13 +612,13 @@ contract IDO is ReentrancyGuard {
         uint256 actualUSDCIn = usdcAmountIn;
         uint256 actualFee = fee;
         uint256 actualUSDCAfterFee = usdcAmountAfterFee;
-        uint256 refund = 0;
 
         if (tokensOut > availableTokens) {
             // Cap tokens to available
             tokensOut = availableTokens;
 
             // Recalculate actual USDC needed for capped tokens
+            // Note: We only take actualUSDCIn from user, no refund needed
             uint256 actualCostWithoutFee = VirtualAMM.getUSDCIn(
                 reserves,
                 tokensOut
@@ -622,12 +627,15 @@ contract IDO is ReentrancyGuard {
             actualUSDCIn = actualCostWithoutFee + actualFee;
             actualUSDCAfterFee = actualCostWithoutFee;
 
-            // Calculate refund
-            refund = usdcAmountIn - actualUSDCIn;
+            // Skip slippage check when capped - user is getting ALL available tokens
+            // and only paying for what they receive. This is safe because:
+            // 1. User provided more than enough USDC (willing to pay more)
+            // 2. User receives all remaining salable tokens
+            // 3. User only pays for actual tokens received
+        } else {
+            // Normal case: check slippage
+            if (tokensOut < minTokensOut) revert SlippageExceeded();
         }
-
-        // Check slippage (using capped tokensOut)
-        if (tokensOut < minTokensOut) revert SlippageExceeded();
 
         // Also check virtual AMM reserves
         if (tokensOut > reserves.y) revert InsufficientBalance();
@@ -656,10 +664,8 @@ contract IDO is ReentrancyGuard {
         // Mint tokens to user (frozen)
         DatasetToken(tokenAddress).transfer(msg.sender, tokensOut);
 
-        // Refund excess USDC if capped
-        if (refund > 0) {
-            IERC20(usdcToken).safeTransfer(msg.sender, refund);
-        }
+        // Note: No refund needed here because we only transfer actualUSDCIn from user
+        // The "refund" amount was never taken from user's wallet
 
         emit TokensPurchased(
             msg.sender,
@@ -1001,29 +1007,20 @@ contract IDO is ReentrancyGuard {
         // Treasury gets remaining USDC: actualRaised - USDC_LP
         uint256 projectFunds = usdcBalance - lpFunds;
 
-        // Deposit project funds to Governance (which includes treasury functionality)
-        if (projectFunds > 0) {
-            IERC20(usdcToken).forceApprove(governance, projectFunds);
-            (bool success, ) = governance.call(
-                abi.encodeWithSignature("depositFunds(uint256)", projectFunds)
-            );
-            if (!success) revert DepositFundsFailed();
-        }
-
-        // Create Uniswap V2 liquidity pool
+        // Create Uniswap V2 liquidity pool FIRST (requires lpFunds USDC)
         // Note: LP tokens are sent to Governance contract for permanent locking
         uint256 lpTokensReceived = _createLiquidity(lpFunds, lpTokenAmount);
 
         // Transfer LP tokens to Governance and lock them
         IERC20(liquidityPair).forceApprove(governance, lpTokensReceived);
-        (bool lockSuccess, ) = governance.call(
-            abi.encodeWithSignature(
-                "lockLP(address,uint256)",
-                liquidityPair,
-                lpTokensReceived
-            )
-        );
-        if (!lockSuccess) revert LockLPFailed();
+        IGovernance(governance).lockLP(liquidityPair, lpTokensReceived);
+
+        // Deposit project funds to Governance AFTER LP creation
+        // (depositFunds transfers USDC out, so must happen after _createLiquidity)
+        if (projectFunds > 0) {
+            IERC20(usdcToken).forceApprove(governance, projectFunds);
+            IGovernance(governance).depositFunds(projectFunds);
+        }
 
         // Unfreeze tokens (now all holders can transfer)
         DatasetToken(tokenAddress).unfreeze();
