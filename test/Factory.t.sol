@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./TestBase.sol";
+import "../src/RentalOnly.sol";
 
 contract FactoryTest is DeLongTestBase {
     function setUp() public override {
@@ -258,5 +259,114 @@ contract FactoryTest is DeLongTestBase {
             1,
             "Count should be 1 after deployment"
         );
+    }
+
+    // ========== RentalOnly Tests ==========
+
+    function test_DeployRentalOnly() public {
+        // Setup RentalOnly implementation
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        string memory metadataURI = createTestMetadataURI(100);
+        uint256 hourlyRate = 10e6;
+
+        vm.recordLogs();
+        (uint256 datasetId, address rentalOnly) = factory.deployRentalOnly(
+            projectAddress,
+            metadataURI,
+            hourlyRate
+        );
+
+        assertEq(datasetId, 1, "Dataset ID should be 1");
+        assertTrue(rentalOnly != address(0), "RentalOnly should be created");
+        assertEq(factory.datasetCount(), 1, "Dataset count should be 1");
+    }
+
+    function test_DeployRentalOnlyInitializesCorrectly() public {
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        string memory metadataURI = createTestMetadataURI(101);
+        uint256 hourlyRate = 15e6;
+
+        (, address rentalOnlyAddr) = factory.deployRentalOnly(
+            projectAddress,
+            metadataURI,
+            hourlyRate
+        );
+
+        RentalOnly rentalOnly = RentalOnly(rentalOnlyAddr);
+
+        assertEq(rentalOnly.owner(), projectAddress);
+        assertEq(rentalOnly.usdcToken(), address(usdc));
+        assertEq(rentalOnly.feeTo(), feeTo);
+        assertEq(rentalOnly.metadataURI(), metadataURI);
+        assertEq(rentalOnly.hourlyRate(), hourlyRate);
+        assertTrue(rentalOnly.isActive());
+    }
+
+    function test_SetRentalOnlyImplementation() public {
+        // Deploy new factory without RentalOnly impl
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
+        Governance governanceImpl = new Governance();
+
+        Factory newFactory = new Factory(
+            address(usdc),
+            owner,
+            address(tokenImpl),
+            address(poolImpl),
+            address(idoImpl),
+            address(governanceImpl)
+        );
+        newFactory.configure(
+            feeTo,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
+
+        assertEq(newFactory.rentalOnlyImplementation(), address(0));
+
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        newFactory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        assertEq(newFactory.rentalOnlyImplementation(), address(rentalOnlyImpl));
+    }
+
+    function test_RevertSetRentalOnlyImplementation_AlreadyConfigured() public {
+        RentalOnly rentalOnlyImpl1 = new RentalOnly();
+        RentalOnly rentalOnlyImpl2 = new RentalOnly();
+
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl1));
+
+        vm.expectRevert(Factory.AlreadyConfigured.selector);
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl2));
+    }
+
+    function test_RevertDeployRentalOnly_NotConfigured() public {
+        // Factory without RentalOnly implementation set
+        DatasetToken tokenImpl = new DatasetToken();
+        RentalPool poolImpl = new RentalPool();
+        IDO idoImpl = new IDO();
+        Governance governanceImpl = new Governance();
+
+        Factory newFactory = new Factory(
+            address(usdc),
+            owner,
+            address(tokenImpl),
+            address(poolImpl),
+            address(idoImpl),
+            address(governanceImpl)
+        );
+        newFactory.configure(
+            feeTo,
+            address(0x1111111111111111111111111111111111111111),
+            address(0x2222222222222222222222222222222222222222)
+        );
+
+        vm.expectRevert(Factory.RentalOnlyNotConfigured.selector);
+        newFactory.deployRentalOnly(projectAddress, "ipfs://test", 10e6);
     }
 }

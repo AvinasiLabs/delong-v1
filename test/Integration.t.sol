@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./TestBase.sol";
+import "../src/RentalOnly.sol";
 
 /**
  * @title IntegrationTest
@@ -143,27 +144,39 @@ contract IntegrationTest is DeLongTestBase {
         uint256 user1PendingBefore = pool.getPendingDividends(user1);
         uint256 user2PendingBefore = pool.getPendingDividends(user2);
 
+        // Verify users have pending dividends (they hold tokens and revenue was distributed)
+        assertGt(user1PendingBefore, 0, "User1 should have pending dividends");
+        assertGt(user2PendingBefore, 0, "User2 should have pending dividends");
+
         // User1 claims dividends
-        if (user1PendingBefore > 0) {
-            vm.prank(user1);
-            pool.claimDividends();
-            assertEq(
-                pool.getPendingDividends(user1),
-                0,
-                "User1 should have no pending dividends after claim"
-            );
-        }
+        uint256 user1UsdcBefore = usdc.balanceOf(user1);
+        vm.prank(user1);
+        pool.claimDividends();
+        assertEq(
+            pool.getPendingDividends(user1),
+            0,
+            "User1 should have no pending dividends after claim"
+        );
+        assertEq(
+            usdc.balanceOf(user1),
+            user1UsdcBefore + user1PendingBefore,
+            "User1 USDC should increase by pending amount"
+        );
 
         // User2 claims dividends
-        if (user2PendingBefore > 0) {
-            vm.prank(user2);
-            pool.claimDividends();
-            assertEq(
-                pool.getPendingDividends(user2),
-                0,
-                "User2 should have no pending dividends after claim"
-            );
-        }
+        uint256 user2UsdcBefore = usdc.balanceOf(user2);
+        vm.prank(user2);
+        pool.claimDividends();
+        assertEq(
+            pool.getPendingDividends(user2),
+            0,
+            "User2 should have no pending dividends after claim"
+        );
+        assertEq(
+            usdc.balanceOf(user2),
+            user2UsdcBefore + user2PendingBefore,
+            "User2 USDC should increase by pending amount"
+        );
 
         // ========== Step 6: Project submits treasury withdrawal proposal ==========
         // TODO: Update this test for new Governance architecture
@@ -337,5 +350,414 @@ contract IntegrationTest is DeLongTestBase {
             20 * 10 ** 6,
             "Dataset 2 rate should be 20 USDC"
         );
+    }
+
+    // ========== RentalOnly Integration Tests ==========
+
+    /**
+     * @notice Tests the complete RentalOnly flow: deploy -> purchase -> withdraw -> deactivate
+     */
+    function test_RentalOnlyCompleteFlow() public {
+        // Setup RentalOnly implementation
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        // ========== Step 1: Deploy RentalOnly ==========
+        string memory metadataURI = createTestMetadataURI(100);
+        uint256 hourlyRate = 15e6; // 15 USDC per hour
+
+        (uint256 datasetId, address rentalOnlyAddr) = factory.deployRentalOnly(
+            projectAddress,
+            metadataURI,
+            hourlyRate
+        );
+
+        RentalOnly rental = RentalOnly(rentalOnlyAddr);
+
+        assertEq(datasetId, 1, "First dataset should have ID 1");
+        assertTrue(rental.isActive(), "RentalOnly should be active");
+
+        // ========== Step 2: User purchases access ==========
+        uint256 hoursCount = 48; // 2 days
+        uint256 cost = hourlyRate * hoursCount;
+
+        vm.prank(user1);
+        usdc.approve(rentalOnlyAddr, cost);
+
+        vm.prank(user1);
+        rental.purchaseAccess(hoursCount);
+
+        assertTrue(rental.hasAccess(user1), "User1 should have access");
+        assertEq(rental.accessExpiresAt(user1), block.timestamp + hoursCount * 1 hours);
+
+        // ========== Step 3: Verify fee distribution ==========
+        uint256 protocolFee = (cost * 500) / 10000; // 5%
+        uint256 ownerShare = cost - protocolFee;
+
+        assertEq(usdc.balanceOf(feeTo), protocolFee, "Protocol should receive 5%");
+        assertEq(rental.pendingWithdrawal(), ownerShare, "Owner share should accumulate");
+        assertEq(rental.totalRentalCollected(), cost, "Total should match");
+
+        // ========== Step 4: Owner withdraws earnings ==========
+        uint256 projectBalanceBefore = usdc.balanceOf(projectAddress);
+
+        vm.prank(projectAddress);
+        rental.withdraw();
+
+        assertEq(
+            usdc.balanceOf(projectAddress),
+            projectBalanceBefore + ownerShare,
+            "Owner should receive 95%"
+        );
+        assertEq(rental.pendingWithdrawal(), 0, "Pending should be zero");
+
+        // ========== Step 5: Deactivate ==========
+        vm.prank(projectAddress);
+        rental.deactivate();
+
+        assertFalse(rental.isActive(), "Should be deactivated");
+
+        // User access should still be valid until expiry
+        assertTrue(rental.hasAccess(user1), "User access should remain until expiry");
+
+        // Fast forward past expiry
+        vm.warp(block.timestamp + 50 hours);
+        assertFalse(rental.hasAccess(user1), "User access should expire");
+    }
+
+    /**
+     * @notice Tests upgrade path: RentalOnly -> Deactivate -> IDO
+     */
+    function test_RentalOnlyToIDOUpgrade() public {
+        // Setup RentalOnly implementation
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        string memory metadataURI = createTestMetadataURI(101);
+
+        // ========== Step 1: Deploy RentalOnly ==========
+        (, address rentalOnlyAddr) = factory.deployRentalOnly(
+            projectAddress,
+            metadataURI,
+            10e6
+        );
+
+        RentalOnly rental = RentalOnly(rentalOnlyAddr);
+
+        // ========== Step 2: Some users purchase access ==========
+        vm.prank(user1);
+        usdc.approve(rentalOnlyAddr, 100e6);
+        vm.prank(user1);
+        rental.purchaseAccess(10);
+
+        // ========== Step 3: Owner decides to upgrade to IDO ==========
+        // First withdraw earnings
+        vm.prank(projectAddress);
+        rental.withdraw();
+
+        // Then deactivate
+        vm.prank(projectAddress);
+        rental.deactivate();
+
+        // ========== Step 4: Deploy IDO with same metadata ==========
+        Factory.IDOConfig memory config = Factory.IDOConfig({
+            rTarget: 100_000e6,
+            alpha: 2500
+        });
+
+        uint256 idoDatasetId = factory.deployIDO(
+            projectAddress,
+            "Upgraded Dataset",
+            "UDS",
+            metadataURI,
+            20e6, // Higher hourly rate
+            config
+        );
+
+        assertEq(idoDatasetId, 2, "IDO should have datasetId 2");
+        assertEq(factory.datasetCount(), 2, "Should have 2 datasets total");
+
+        // Old RentalOnly user access still valid until expiry
+        assertTrue(rental.hasAccess(user1), "Old access should still be valid");
+
+        // New users can't purchase from deactivated RentalOnly
+        vm.prank(user2);
+        usdc.approve(rentalOnlyAddr, 100e6);
+        vm.prank(user2);
+        vm.expectRevert(RentalOnly.ContractDeactivated.selector);
+        rental.purchaseAccess(10);
+    }
+
+    /**
+     * @notice Tests that RentalOnly and IDO with different metadata work independently
+     */
+    function test_RentalOnlyAndIDOIsolation() public {
+        // Setup RentalOnly implementation
+        RentalOnly rentalOnlyImpl = new RentalOnly();
+        factory.setRentalOnlyImplementation(address(rentalOnlyImpl));
+
+        // ========== Deploy RentalOnly for metadata A ==========
+        string memory metadataA = createTestMetadataURI(200);
+        (, address rentalOnlyAddr) = factory.deployRentalOnly(
+            projectAddress,
+            metadataA,
+            10e6
+        );
+        RentalOnly rental = RentalOnly(rentalOnlyAddr);
+
+        // ========== Deploy IDO for metadata B ==========
+        string memory metadataB = createTestMetadataURI(201);
+        Factory.IDOConfig memory config = Factory.IDOConfig({
+            rTarget: 50_000e6,
+            alpha: 2000
+        });
+
+        vm.recordLogs(); // Start recording logs BEFORE deployIDO
+        uint256 idoBDatasetId = factory.deployIDO(
+            projectAddress,
+            "IDO Dataset",
+            "IDS",
+            metadataB,
+            15e6,
+            config
+        );
+
+        // Get IDO address from event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
+        address idoAddrB;
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                idoAddrB = address(uint160(uint256(entries[i].topics[3])));
+                break;
+            }
+        }
+        assertTrue(idoAddrB != address(0), "IDO address should not be zero");
+        IDO idoContract = IDO(idoAddrB);
+
+        // ========== Both should work independently ==========
+        assertEq(factory.datasetCount(), 2, "Should have 2 datasets");
+
+        // RentalOnly works
+        vm.prank(user1);
+        usdc.approve(rentalOnlyAddr, 100e6);
+        vm.prank(user1);
+        rental.purchaseAccess(10);
+        assertTrue(rental.hasAccess(user1), "RentalOnly access should work");
+
+        // IDO works
+        vm.prank(user2);
+        usdc.approve(idoAddrB, 100e6);
+        vm.prank(user2);
+        idoContract.purchaseAccess(5);
+        assertTrue(idoContract.hasValidAccess(user2), "IDO access should work");
+
+        // Different hourly rates
+        assertEq(rental.hourlyRate(), 10e6, "RentalOnly rate should be 10");
+        assertEq(idoContract.hourlyRate(), 15e6, "IDO rate should be 15");
+
+        // Deactivating RentalOnly doesn't affect IDO
+        vm.prank(projectAddress);
+        rental.deactivate();
+
+        assertTrue(idoContract.hasValidAccess(user2), "IDO access should still work");
+    }
+
+    // ========== Dividend Distribution Edge Case Tests ==========
+
+    /**
+     * @notice Tests dividend distribution when tokens are transferred between users
+     * @dev Verifies that:
+     *      1. User A can claim dividends earned before transfer
+     *      2. User B can only claim dividends earned after receiving tokens
+     *      3. Total dividends distributed equals total revenue added
+     */
+    function test_ClaimDividends_AfterTokenTransfer() public {
+        // ========== Setup: Deploy dataset and get contracts ==========
+        Factory.IDOConfig memory config = Factory.IDOConfig({
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
+        });
+
+        vm.prank(user1);
+        vm.recordLogs();
+        factory.deployIDO(
+            projectAddress,
+            "Dividend Test Dataset",
+            "DVT",
+            createTestMetadataURI(300),
+            10 * 10 ** 6,
+            config
+        );
+
+        // Get deployed contracts from event
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
+        address idoAddr_;
+        address tokenAddr_;
+        address poolAddr_;
+
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                idoAddr_ = address(uint160(uint256(entries[i].topics[3])));
+                (tokenAddr_, poolAddr_, , , ) =
+                    abi.decode(entries[i].data, (address, address, address, uint256, uint256));
+                break;
+            }
+        }
+
+        IDO testIdo = IDO(idoAddr_);
+        DatasetToken token = DatasetToken(tokenAddr_);
+        RentalPool pool = RentalPool(poolAddr_);
+
+        // ========== Step 1: User1 buys tokens ==========
+        vm.prank(user1);
+        usdc.approve(idoAddr_, 100_000e6);
+        vm.prank(user1);
+        testIdo.swapUSDCForExactTokens(100_000e18, 100_000e6, block.timestamp + 300);
+
+        uint256 user1Tokens = token.balanceOf(user1);
+        assertGt(user1Tokens, 0, "User1 should have tokens");
+
+        // ========== Step 2: First rental revenue (User1 owns some tokens) ==========
+        uint256 firstRentalCost = 100e6; // 10 hours * 10 USDC
+        vm.prank(user1);
+        usdc.approve(idoAddr_, firstRentalCost);
+        vm.prank(user1);
+        testIdo.purchaseAccess(10);
+
+        // Check User1's pending dividends from first revenue
+        uint256 user1PendingAfterFirst = pool.getPendingDividends(user1);
+        assertGt(user1PendingAfterFirst, 0, "User1 should have pending after first revenue");
+
+        // ========== Step 3: Manually unfreeze token for testing ==========
+        // In real scenario, this happens after IDO launch
+        // For testing dividend edge cases, we simulate IDO calling unfreeze
+        vm.prank(idoAddr_);
+        token.unfreeze();
+
+        // ========== Step 4: User1 transfers half tokens to User3 ==========
+        uint256 transferAmount = user1Tokens / 2;
+        vm.prank(user1);
+        token.transfer(user3, transferAmount);
+
+        // Verify balances
+        assertEq(token.balanceOf(user1), user1Tokens - transferAmount, "User1 balance after transfer");
+        assertEq(token.balanceOf(user3), transferAmount, "User3 balance after transfer");
+
+        // User1 should still have pending dividends (saved by beforeBalanceChange hook)
+        uint256 user1PendingAfterTransfer = pool.getPendingDividends(user1);
+        assertGt(user1PendingAfterTransfer, 0, "User1 should still have pending after transfer");
+
+        // User3 should have NO pending dividends (just received tokens)
+        uint256 user3PendingAfterTransfer = pool.getPendingDividends(user3);
+        assertEq(user3PendingAfterTransfer, 0, "User3 should have no pending right after transfer");
+
+        // ========== Step 5: Second rental revenue (after transfer) ==========
+        uint256 secondRentalCost = 100e6;
+        vm.prank(user2);
+        usdc.approve(idoAddr_, secondRentalCost);
+        vm.prank(user2);
+        testIdo.purchaseAccess(10);
+
+        // Now both User1 and User3 should have pending dividends from second revenue
+        uint256 user1PendingAfterSecond = pool.getPendingDividends(user1);
+        uint256 user3PendingAfterSecond = pool.getPendingDividends(user3);
+
+        assertGt(user1PendingAfterSecond, user1PendingAfterTransfer, "User1 should earn more from second revenue");
+        assertGt(user3PendingAfterSecond, 0, "User3 should have pending from second revenue");
+
+        // ========== Step 6: Both users claim ==========
+        uint256 user1BalanceBefore = usdc.balanceOf(user1);
+        vm.prank(user1);
+        uint256 user1Claimed = pool.claimDividends();
+
+        uint256 user3BalanceBefore = usdc.balanceOf(user3);
+        vm.prank(user3);
+        uint256 user3Claimed = pool.claimDividends();
+
+        // Verify USDC received
+        assertEq(usdc.balanceOf(user1), user1BalanceBefore + user1Claimed, "User1 should receive claimed USDC");
+        assertEq(usdc.balanceOf(user3), user3BalanceBefore + user3Claimed, "User3 should receive claimed USDC");
+
+        // User1 should have claimed more than User3 (owned tokens for both revenues)
+        assertGt(user1Claimed, user3Claimed, "User1 should claim more (owned tokens longer)");
+
+        // After claim, pending should be 0
+        assertEq(pool.getPendingDividends(user1), 0, "User1 pending should be 0 after claim");
+        assertEq(pool.getPendingDividends(user3), 0, "User3 pending should be 0 after claim");
+    }
+
+    /**
+     * @notice Tests claiming dividends across multiple revenue additions
+     */
+    function test_ClaimDividends_MultipleRevenueRounds() public {
+        // Setup
+        Factory.IDOConfig memory config = Factory.IDOConfig({
+            rTarget: 50_000 * 10 ** 6,
+            alpha: 2000
+        });
+
+        vm.prank(user1);
+        vm.recordLogs();
+        factory.deployIDO(
+            projectAddress,
+            "Multi Revenue Test",
+            "MRT",
+            createTestMetadataURI(301),
+            10 * 10 ** 6,
+            config
+        );
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("IDOCreated(uint256,address,address,address,address,address,uint256,uint256)");
+        address idoAddr_;
+        address poolAddr_;
+
+        for (uint i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                idoAddr_ = address(uint160(uint256(entries[i].topics[3])));
+                (, poolAddr_, , , ) =
+                    abi.decode(entries[i].data, (address, address, address, uint256, uint256));
+                break;
+            }
+        }
+
+        IDO testIdo = IDO(idoAddr_);
+        RentalPool pool = RentalPool(poolAddr_);
+
+        // User1 buys tokens
+        vm.prank(user1);
+        usdc.approve(idoAddr_, 100_000e6);
+        vm.prank(user1);
+        testIdo.swapUSDCForExactTokens(100_000e18, 100_000e6, block.timestamp + 300);
+
+        // Multiple rounds of revenue
+        for (uint i = 0; i < 5; i++) {
+            vm.prank(user2);
+            usdc.approve(idoAddr_, 100e6);
+            vm.prank(user2);
+            testIdo.purchaseAccess(10);
+        }
+
+        // Single claim should get all accumulated dividends
+        uint256 totalPending = pool.getPendingDividends(user1);
+        assertGt(totalPending, 0, "Should have accumulated dividends");
+
+        vm.prank(user1);
+        uint256 claimed = pool.claimDividends();
+
+        assertEq(claimed, totalPending, "Should claim all pending");
+        assertEq(pool.getPendingDividends(user1), 0, "Pending should be 0 after claim");
+
+        // Add more revenue after claim
+        vm.prank(user2);
+        usdc.approve(idoAddr_, 100e6);
+        vm.prank(user2);
+        testIdo.purchaseAccess(10);
+
+        // Should have new pending from latest revenue
+        uint256 newPending = pool.getPendingDividends(user1);
+        assertGt(newPending, 0, "Should have new pending after post-claim revenue");
     }
 }

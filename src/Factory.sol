@@ -8,6 +8,7 @@ import "./IDO.sol";
 import "./DatasetToken.sol";
 import "./RentalPool.sol";
 import "./Governance.sol";
+import "./RentalOnly.sol";
 import "./libraries/VirtualAMM.sol";
 
 /**
@@ -37,6 +38,7 @@ contract Factory is Ownable {
     address public poolImplementation;
     address public idoImplementation;
     address public governanceImplementation;
+    address public rentalOnlyImplementation;
 
     // ========== Mutable State ==========
 
@@ -73,6 +75,16 @@ contract Factory is Ownable {
         address uniswapV2Factory
     );
 
+    event RentalOnlyCreated(
+        uint256 indexed datasetId,
+        address indexed projectAddress,
+        address indexed rentalOnly,
+        string metadataURI,
+        uint256 hourlyRate
+    );
+
+    event RentalOnlyImplementationSet(address implementation);
+
     // ========== Errors ==========
 
     error ZeroAddress();
@@ -80,6 +92,7 @@ contract Factory is Ownable {
     error InvalidRTarget(); // rTarget must be positive
     error InvalidAlpha(); // alpha must be 1-5000 (0.01%-50%)
     error AlreadyConfigured(); // Factory already configured
+    error RentalOnlyNotConfigured(); // rentalOnlyImplementation not set
 
     // ========== Constructor ==========
 
@@ -301,5 +314,67 @@ contract Factory is Ownable {
         uniswapV2Factory = uniswapV2Factory_;
 
         emit Configured(feeTo_, uniswapV2Router_, uniswapV2Factory_);
+    }
+
+    /**
+     * @notice Sets the RentalOnly implementation address
+     * @dev Can only be called once. Owner-only function.
+     * @param rentalOnlyImpl_ Pre-deployed RentalOnly implementation address
+     */
+    function setRentalOnlyImplementation(
+        address rentalOnlyImpl_
+    ) external onlyOwner {
+        if (rentalOnlyImplementation != address(0)) revert AlreadyConfigured();
+        if (rentalOnlyImpl_ == address(0)) revert ZeroAddress();
+
+        rentalOnlyImplementation = rentalOnlyImpl_;
+
+        emit RentalOnlyImplementationSet(rentalOnlyImpl_);
+    }
+
+    // ========== RentalOnly Functions ==========
+
+    /**
+     * @notice Deploys a RentalOnly contract for simple data rental without IDO
+     * @dev Uses EIP-1167 minimal proxy pattern. No token, no investors, no governance.
+     *
+     * @param projectAddress Owner of the rental contract
+     * @param metadataURI IPFS CID pointing to dataset metadata
+     * @param rentalPricePerHour Rental price in USDC (6 decimals)
+     *
+     * @return datasetId Unique identifier for this dataset
+     * @return rentalOnly Deployed RentalOnly contract address
+     */
+    function deployRentalOnly(
+        address projectAddress,
+        string memory metadataURI,
+        uint256 rentalPricePerHour
+    ) external returns (uint256 datasetId, address rentalOnly) {
+        if (projectAddress == address(0)) revert ZeroAddress();
+        if (bytes(metadataURI).length == 0) revert EmptyString();
+        if (rentalOnlyImplementation == address(0))
+            revert RentalOnlyNotConfigured();
+
+        datasetId = ++datasetCount;
+
+        // Clone RentalOnly implementation
+        rentalOnly = Clones.clone(rentalOnlyImplementation);
+
+        // Initialize RentalOnly contract
+        RentalOnly(rentalOnly).initialize(
+            projectAddress,
+            usdc,
+            feeTo,
+            metadataURI,
+            rentalPricePerHour
+        );
+
+        emit RentalOnlyCreated(
+            datasetId,
+            projectAddress,
+            rentalOnly,
+            metadataURI,
+            rentalPricePerHour
+        );
     }
 }
